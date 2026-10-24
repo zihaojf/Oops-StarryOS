@@ -3120,6 +3120,7 @@ name = "starryos"
 version = "0.2.0-preview.2"
 dependencies = [
  "axfeat",
+ "axfs-ng",
  "axplat-riscv64-visionfive2",
  "starry-kernel",
 ]

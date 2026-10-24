@@ -125,6 +125,13 @@ pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> AxResult<isize> {
     Ok(0)
 }
 
+pub fn sys_reboot(_magic: u32, _magic2: u32, cmd: u32, _arg: usize) -> AxResult<isize> {
+    info!("sys_reboot <= cmd: {cmd:#x}");
+    // All reboot commands (power-off, halt, restart) terminate the machine in a
+    // QEMU based evaluation environment.
+    axhal::power::system_off();
+}
+
 #[cfg(target_arch = "riscv64")]
 pub fn sys_riscv_flush_icache() -> AxResult<isize> {
     riscv::asm::fence_i();

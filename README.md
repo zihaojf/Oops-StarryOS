@@ -89,37 +89,62 @@ cd StarryOS
 cargo -V
 ```
 
-### 3. Prepare rootfs
+### 3. Build the competition kernels
+
+The top-level `Makefile` is set up for the OS kernel competition.  It uses the
+vendored crates in `vendor/` and builds completely offline:
 
 ```bash
-# Default target: riscv64
-make rootfs
-# Explicit target
-make ARCH=riscv64 rootfs
-make ARCH=loongarch64 rootfs
+make all        # build ./kernel-rv and ./kernel-la (ELF)
+make rv         # build only ./kernel-rv
+make la         # build only ./kernel-la
 ```
 
-This will download rootfs image from [Starry-OS/rootfs](https://github.com/Starry-OS/rootfs/releases) and set up the disk file for running on QEMU.
+`make all` performs the following steps:
 
-### 4. Build and run on QEMU
+1. recreates `.cargo/config.toml` from `config.toml.temp` and restores the
+   vendored crate checksums (the submission system drops hidden files);
+2. builds the kernel for `riscv64gc-unknown-none-elf` with virtio-mmio support
+   and for `loongarch64-unknown-none-softfloat` with virtio-pci support;
+3. rewrites the load addresses/entry point of the linked ELFs with
+   `scripts/mkphyself.rs` so that QEMU's `-kernel` loader can start them.
+
+The Rust toolchain is pinned to `nightly-2025-05-20`, which is shipped in the
+evaluation image together with the required `riscv64gc-unknown-none-elf` and
+`loongarch64-unknown-none-softfloat` targets.  Use `make TOOLCHAIN=<toolchain>`
+if the evaluation image provides a different one.  A few vendored crates are
+lightly patched so that they build with this toolchain (the upstream versions
+use unstable library features that were only stabilized later).
+
+The `riscv64-linux-musl` and `loongarch64-linux-musl` cross compilers are
+expected under `/opt` (as in the competition image) or somewhere in `PATH`.
+
+### 4. Run with the competition test image
+
+At boot the kernel scans the root directory, `/glibc` and `/musl` for
+`*_testcode.sh` scripts.  It prepares a small runtime environment (a static
+`/bin/sh`, the glibc/musl dynamic loaders and `LD_LIBRARY_PATH`), runs every test point
+serially and then shuts the machine down.  `lmbench` and `ltp` are skipped
+because they are too slow/unsupported for now.  On LoongArch64 `iozone` and
+`unixbench` are skipped as well (the timer implementation is incomplete and
+`iozone` hangs), while the network test points are still run.
+
+For local testing with the official disk images:
 
 ```bash
-# Default target: riscv64
-make build
-# Explicit target
-make ARCH=riscv64 build
-make ARCH=loongarch64 build
-
-# Run on QEMU (also rebuilds if necessary)
-make ARCH=riscv64 run
-make ARCH=loongarch64 run
+make run-rv     # uses ./sdcard-rv.img
+make run-la     # uses ./sdcard-la.img
 ```
 
-Note:
+`disk.img` is not generated: the evaluation system mounts the test image itself.
 
-1. Binary dependencies will be automatically built during `make build`.
-2. You don't have to rerun `build` every time. `run` automatically rebuilds if necessary.
-3. The disk file will **not** be reset between each run. As a result, if you want to switch to another architecture, you must run `make rootfs` with the new architecture before `make run`.
+To inspect which test points and test cases passed, capture the serial output and
+summarize it:
+
+```bash
+make run-rv 2>&1 | tee rv.log
+python3 scripts/summarize-tests.py rv.log
+```
 
 ## What next?
 

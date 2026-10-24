@@ -105,13 +105,22 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
         }
     };
 
-    block_on(interruptible(poll_fn(|cx| {
-        match check_children().transpose() {
-            Some(res) => Poll::Ready(res),
-            None => {
-                proc_data.child_exit_event.register(cx.waker());
-                Poll::Pending
+    // Signals (most notably `SIGCHLD`) may interrupt the wait.  Retry instead of
+    // reporting `EINTR` so that shells and `timeout`/`wait` based tools observe
+    // the real child status.  This matches the restart behavior that these
+    // programs expect from `waitpid`.
+    loop {
+        match block_on(interruptible(poll_fn(|cx| {
+            match check_children().transpose() {
+                Some(res) => Poll::Ready(res),
+                None => {
+                    proc_data.child_exit_event.register(cx.waker());
+                    Poll::Pending
+                }
             }
+        }))) {
+            Ok(res) => return res,
+            Err(_) => continue,
         }
-    })))?
+    }
 }

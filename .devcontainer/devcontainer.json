@@ -1,0 +1,21 @@
+{
+    "name": "StarryOS-Eval",
+    "image": "zhouzhouyi/os-contest:20260510",
+    "workspaceFolder": "/work",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/work,type=bind,consistency=cached",
+    "runArgs": [
+        "--privileged"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer"
+            ],
+            "settings": {
+                "rust-analyzer.cargo.extraEnv": {
+                    "AX_CONFIG_PATH": "${workspaceFolder}/.axconfig.toml"
+                }
+            }
+        }
+    }
+}

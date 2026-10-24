@@ -27,3 +27,7 @@
 # Script files (keep executable)
 *.sh text eol=lf
 
+# Vendored sources must be byte-identical: cargo verifies their sha256 in
+# cargo-checksum.json, so Git must not normalize their line endings.
+vendor/** -text
+

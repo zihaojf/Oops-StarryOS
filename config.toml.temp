@@ -1,0 +1,14 @@
+# Cargo configuration used when building the OS competition kernel.
+#
+# The evaluation system filters out hidden files and directories when cloning
+# the project, so this file lives in the repository root under a visible name
+# and `make all` installs it as `.cargo/config.toml` before invoking cargo.
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[net]
+offline = true
