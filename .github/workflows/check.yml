@@ -60,10 +60,9 @@ jobs:
         with:
           arch: ${{ matrix.musl }}
 
-      # The submission pipeline drops .cargo/, so `make prepare` recreates
-      # .cargo/config.toml (vendored sources + offline) before cargo runs.
-      - name: Prepare cargo config
-        run: make prepare
-
+      # Lint through the Makefile: `cargo clippy` alone lacks AX_CONFIG_PATH
+      # (axconfig then falls back to a missing axconfig.toml and the build
+      # aborts with exit 101), and `make prepare` is what recreates
+      # .cargo/config.toml from config.toml.temp for the vendored sources.
       - name: Clippy
-        run: cargo clippy --target ${{ matrix.target }} -F qemu -- -D warnings -A unused
+        run: make check-${{ matrix.arch }}

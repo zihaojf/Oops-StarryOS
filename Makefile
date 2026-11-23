@@ -8,6 +8,7 @@
 #   make all      build both kernels (default)
 #   make rv       build only kernel-rv
 #   make la       build only kernel-la
+#   make check    clippy for both archs (same env as the build)
 #   make clean    remove build artifacts
 #   make run-rv   boot kernel-rv with the riscv64 test image (for local testing)
 #   make run-la   boot kernel-la with the loongarch64 test image (for local testing)
@@ -46,7 +47,7 @@ COMMON_ENV := \
 	AX_GW=10.0.2.2 \
 	AX_MODE=release
 
-.PHONY: all rv la prepare clean run-rv run-la kernel-rv kernel-la
+.PHONY: all rv la prepare clean run-rv run-la kernel-rv kernel-la check check-rv check-la
 
 all: rv la
 
@@ -93,6 +94,32 @@ la: prepare $(MKPHYSELF)
 		--features "qemu"
 	@$(MKPHYSELF) $(LA_ELF) kernel-la 0xffff_8000_0000_0000 0x0020_0040
 	@echo "==> kernel-la is ready"
+
+# Lint with the same environment as the real build.  axconfig reads
+# AX_CONFIG_PATH at compile time (vendored axconfig_macros falls back to a
+# non-existent axconfig.toml), so a bare `cargo clippy` aborts -- even though
+# `make rv` succeeds.
+CLIPPY_ARGS ?= -- -D warnings -A unused
+
+check-rv: prepare
+	@AX_CONFIG_PATH=$(CURDIR)/$(RV_CONFIG) \
+	 AX_ARCH=riscv64 \
+	 AX_PLATFORM=$(RV_PLATFORM) \
+	 AX_TARGET=$(RV_TARGET) \
+	 $(COMMON_ENV) \
+	 $(CARGO) clippy --offline --target $(RV_TARGET) --target-dir $(TARGET_DIR) \
+		--features "qemu,axfeat/bus-mmio" $(CLIPPY_ARGS)
+
+check-la: prepare
+	@AX_CONFIG_PATH=$(CURDIR)/$(LA_CONFIG) \
+	 AX_ARCH=loongarch64 \
+	 AX_PLATFORM=$(LA_PLATFORM) \
+	 AX_TARGET=$(LA_TARGET) \
+	 $(COMMON_ENV) \
+	 $(CARGO) clippy --offline --target $(LA_TARGET) --target-dir $(TARGET_DIR) \
+		--features "qemu" $(CLIPPY_ARGS)
+
+check: check-rv check-la
 
 # Local testing helpers.  The test images are not part of the submission.
 run-rv: kernel-rv
