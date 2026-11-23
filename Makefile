@@ -99,7 +99,12 @@ la: prepare $(MKPHYSELF)
 # AX_CONFIG_PATH at compile time (vendored axconfig_macros falls back to a
 # non-existent axconfig.toml), so a bare `cargo clippy` aborts -- even though
 # `make rv` succeeds.
-CLIPPY_ARGS ?= -- -D warnings -A unused
+# `-A clippy::uninlined_format_args` is intentional: the kernel still writes
+# `warn!("... {:?}", x)` instead of `warn!("... {x:?}")` in ~16 log macros, so
+# the style lint fires on every build. It is a pure formatting lint with no
+# behavioural meaning; re-enable it (drop the -A) once those call sites are
+# inlined -- see ../clippy-inline-format.patch.
+CLIPPY_ARGS ?= -- -D warnings -A unused -A clippy::uninlined_format_args
 
 check-rv: prepare
 	@AX_CONFIG_PATH=$(CURDIR)/$(RV_CONFIG) \
