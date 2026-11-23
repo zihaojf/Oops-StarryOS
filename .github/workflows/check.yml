@@ -18,10 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@nightly
+      # rust-toolchain.toml pins one exact nightly; installing "just nightly"
+      # here would leave the pinned toolchain without rustfmt.
+      - name: Install Rust (pinned toolchain)
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt
+          toolchain: nightly-2025-05-20
+          components: rustfmt, rust-src, llvm-tools-preview
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -32,18 +35,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: riscv64
+          # arch  = make target (this repo builds rv/la only)
+          # musl  = setup-musl 的架构名（rv/la 不是它认识的取值）
+          - arch: rv
+            musl: riscv64
             target: riscv64gc-unknown-none-elf
-          - arch: loongarch64
+          - arch: la
+            musl: loongarch64
             target: loongarch64-unknown-none-softfloat
-          - arch: aarch64
-            target: aarch64-unknown-none-softfloat
-          - arch: x86_64
-            target: x86_64-unknown-none
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install Rust (pinned toolchain)
+        uses: dtolnay/rust-toolchain@master
         with:
-          submodules: "recursive"
+          toolchain: nightly-2025-05-20
+          components: clippy, rust-src, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -51,7 +58,12 @@ jobs:
 
       - uses: arceos-org/setup-musl@v1
         with:
-          arch: ${{ matrix.arch }}
+          arch: ${{ matrix.musl }}
+
+      # The submission pipeline drops .cargo/, so `make prepare` recreates
+      # .cargo/config.toml (vendored sources + offline) before cargo runs.
+      - name: Prepare cargo config
+        run: make prepare
 
       - name: Clippy
         run: cargo clippy --target ${{ matrix.target }} -F qemu -- -D warnings -A unused

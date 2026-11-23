@@ -6,14 +6,21 @@ on:
       arch:
         type: string
         required: true
+      musl_arch:
+        type: string
+        required: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install Rust (pinned toolchain)
+        uses: dtolnay/rust-toolchain@master
         with:
-          submodules: "recursive"
+          toolchain: nightly-2025-05-20
+          components: rust-src, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -22,44 +29,19 @@ jobs:
 
       - uses: arceos-org/setup-musl@v1
         with:
-          arch: ${{ inputs.arch }}
+          arch: ${{ inputs.musl_arch }}
 
+      # make <arch> runs `prepare` first (recreates .cargo/config.toml from
+      # config.toml.temp) and then builds kernel-<arch>.
       - name: Build
-        run: make ARCH=${{ inputs.arch }} build
+        run: make ${{ inputs.arch }}
 
       - uses: actions/upload-artifact@v5
         with:
-          name: starry-${{ inputs.arch }}
-          path: |
-            *.bin
-            *.elf
+          name: kernel-${{ inputs.arch }}
+          path: kernel-*
 
-  test:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: "recursive"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test
-          cache-targets: false
-
-      - name: Setup QEMU
-        uses: arceos-org/setup-qemu@v1
-        with:
-          version: 10.1.0
-          arch_list: ${{ inputs.arch }}
-
-      - name: Download build artifact
-        uses: actions/download-artifact@v6
-        with:
-          name: starry-${{ inputs.arch }}
-
-      - name: Prepare rootfs
-        run: make ARCH=${{ inputs.arch }} rootfs
-
-      - name: Test
-        run: make ARCH=${{ inputs.arch }} ci-test
+  # The runtime half of the upstream workflow needs sdcard-<arch>.img, which is
+  # a 4 GiB competition image and is deliberately not in this repository. Boot
+  # tests and scoring live in the sibling `oskernel-eval` repo instead:
+  #   git clone <oskernel-eval> && make rv && make points

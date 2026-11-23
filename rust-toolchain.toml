@@ -1,7 +1,11 @@
 [toolchain]
 profile = "minimal"
 channel = "nightly-2025-05-20"
-components = ["rust-src", "llvm-tools-preview", "rust-analyzer"]
+# rust-src and llvm-tools are needed to build the kernel image (build-std +
+# objcopy). rustfmt and clippy are what .github/workflows/check.yml runs --
+# without them `cargo fmt` / `cargo clippy` fail on this pinned toolchain,
+# because the workflow installs the toolchain named here, not "latest nightly".
+components = ["rust-src", "llvm-tools-preview", "rustfmt", "clippy", "rust-analyzer"]
 targets = [
     "riscv64gc-unknown-none-elf",
     "loongarch64-unknown-none-softfloat",

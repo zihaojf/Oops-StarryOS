@@ -17,8 +17,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [riscv64, loongarch64, aarch64, x86_64]
+        include:
+          - arch: rv
+            musl_arch: riscv64
+          - arch: la
+            musl_arch: loongarch64
     uses: ./.github/workflows/test-template.yml
     with:
       arch: ${{ matrix.arch }}
+      musl_arch: ${{ matrix.musl_arch }}
     secrets: inherit
