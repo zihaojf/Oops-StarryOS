@@ -53,6 +53,41 @@ LONG_ORDER   [unixbench]                                               (limit 60
 - watchdog：非 LoongArch 且有 busybox 时，后台 `sleep 1800; poweroff`，正常结束时 kill。
 - 结尾 `$BB sync; exit 0` → 触发 `entry::init` 的 `join` 返回 → 卸载 + flush + 关机。
 
+### 3.5 测试点选择（`TEST_ONLY` / `TEST_SKIP`）
+
+两个变量，留空即"全部"，`TEST_SKIP` 优先：
+
+```sh
+TEST_ONLY="ltp"                                            # 白名单：只跑这些
+TEST_SKIP="ltp/clone* ltp/close_range*"                    # 黑名单：从里面剔除
+```
+
+token 用空格分隔、支持 shell 通配，几种写法：
+
+```text
+ltp                          整轮 LTP
+basic / libctest / unixbench 套件（也可写 basic_testcode.sh）
+musl / glibc                 libc 变体（= 测试目录）
+basic-musl                   套件 + 变体
+ltp/pipe02                   单个 LTP 用例；ltp/clone* 表示一批
+```
+
+常见组合：
+
+```sh
+TEST_ONLY="ltp" TEST_SKIP="ltp/clone*"        # LTP 里去掉所有 clone 用例
+TEST_ONLY="musl basic libctest"               # 只跑 musl 的两个套件
+TEST_SKIP="unixbench iozone ltp"              # 除了这三样全跑
+```
+
+当前仓库里的默认值是**调试配置**：`TEST_ONLY="ltp"`，
+`TEST_SKIP="ltp/clone* ltp/close_range* ltp/cpuctl_def_task* ltp/cpuacct_task ltp/cpuacct.sh"`
+——前两项会 panic / 自旋死锁，后三项是 LTP 的 cgroup CPU helper（裸跑会对整个进程组发
+`SIGUSR1`，曾把 init 打死导致整机静默关机）。正式评分前把两行都改成空字符串。
+
+生效的选择会打到串口（`#### StarryOS: tests only="..." skip="..." ####`），日志里能看到这次跑了什么。
+因为 `init.sh` 是 `include_str!` 内联进内核的，改这两个值必须重新 `make all`。
+
 ## 4. 不变量与约束
 
 - 脚本必须以 `exit 0` 结束（正常路径），否则 init 退出码非 0（仅日志可见）。
@@ -60,6 +95,10 @@ LONG_ORDER   [unixbench]                                               (limit 60
 - 不得假设 `/bin/sh` 已存在（竞赛镜像没有，必须先 `prepare_environment`）。
 - 不得依赖 `sleep/timeout` 在 LoongArch 上可靠（定时器不完整，故跳过 watchdog 与部分测试）。
 - **`include_str!` 内联**：修改本文件后必须重新 `make all` 才生效。
+- 选择只做"筛"：不改顺序、不改超时、不动内建 hang 跳过表（`LTP_SKIP`）；未选中的用例不会打印 `RUN/FAIL LTP CASE`。
+- `init.sh` 没有信号保护（内核还没实现 PID 1 语义）：LTP 的 cgroup helper 一句 `kill(-pgid, SIGUSR1)`
+  就能打死 init，而 init 一退出内核就 `system_off()`（`axtask::run_queue::exit_current` 的 `is_init()` 分支），
+  表现为"串口突然没了、QEMU 退出码 0、无 END/panic"。当前靠 `TEST_SKIP` 把这类 helper 剔掉，内核侧待修。
 
 ## 5. 与其他模块的关系
 
@@ -71,7 +110,7 @@ LONG_ORDER   [unixbench]                                               (limit 60
 ## 6. 已知局限 / TODO
 
 - 只支持 busybox；没有 `/bin/sh` 的真实 rootfs 走普通模式。
-- 测试点列表硬编码，新增测试需要改脚本并重编。
+- 测试点集合由 `TEST_ONLY` / `TEST_SKIP` 选择（见 3.5），但可选的名字仍来自 `FAST/MEDIUM/LONG_ORDER` 与镜像里的脚本，新增测试仍需改脚本并重编。
 - `poweroff`/`reboot` 依赖 `sys_reboot`（当前所有 cmd 都 `system_off`）。
 - LoongArch 的跳过列表是为了规避已知 hang，不是架构能力差异。
 
