@@ -19,6 +19,9 @@ struct TimerKey {
 struct TimerRuntime {
     key: u64,
     wheel: BTreeMap<TimerKey, Waker>,
+    /// Monotonic deadline (ns) currently programmed into the hardware timer,
+    /// `0` when this runtime has not armed it (e.g. the timer just fired).
+    armed: u64,
 }
 
 impl TimerRuntime {
@@ -26,7 +29,23 @@ impl TimerRuntime {
         TimerRuntime {
             key: 0,
             wheel: BTreeMap::new(),
+            armed: 0,
         }
+    }
+
+    /// Programs the hardware timer at `mono_ns` if that is earlier than what is
+    /// already armed.
+    ///
+    /// Without this, a task asking for a 1 ms sleep right after a 10 ms tick
+    /// would only be woken at the next tick: sub-tick sleeps would silently
+    /// degrade to the tick period.
+    #[cfg(feature = "irq")]
+    fn arm_earliest(&mut self, mono_ns: u64) {
+        if self.armed != 0 && mono_ns >= self.armed {
+            return;
+        }
+        self.armed = mono_ns;
+        axhal::time::set_oneshot_timer(mono_ns);
     }
 
     fn add(&mut self, deadline: TimeValue) -> Option<TimerKey> {
@@ -40,6 +59,20 @@ impl TimerRuntime {
         };
         self.wheel.insert(key, Waker::noop().clone());
         self.key += 1;
+
+        // If this sleep is now the earliest one, pull the hardware timer in so
+        // that it fires exactly at the deadline instead of at the next tick.
+        #[cfg(feature = "irq")]
+        if self.wheel.keys().next().map(|k| k.deadline) == Some(deadline) {
+            let mono_ns = (deadline.as_nanos() as u64)
+                .saturating_sub(axhal::time::epochoffset_nanos())
+                // Keep a margin of 100 us: the deadline may be in the past (then
+                // the timer must fire immediately, but not at "now"), and on
+                // LoongArch64 `nanos_to_ticks()` truncation can turn a 1 us
+                // margin into a zero-length timer, which storms the CPU.
+                .max(axhal::time::monotonic_time_nanos() + 100_000);
+            self.arm_earliest(mono_ns);
+        }
 
         Some(key)
     }
@@ -58,6 +91,9 @@ impl TimerRuntime {
     }
 
     fn wake(&mut self) {
+        // The hardware timer has fired, so nothing is armed any more.
+        self.armed = 0;
+
         if self.wheel.is_empty() {
             return;
         }
@@ -90,6 +126,27 @@ fn with_current<R>(f: impl FnOnce(&mut TimerRuntime) -> R) -> R {
     // FIXME: optimize `percpu` crate! should disable irq and provide more apis
     let _g = kernel_guard::NoPreemptIrqSave::new();
     f(unsafe { TIMER_RUNTIME.current_ref_mut_raw() })
+}
+
+/// Returns the earliest deadline registered on the current CPU, if any.
+///
+/// The value uses the same time base as [`wall_time()`], i.e. it may include the
+/// epoch offset and must be rebased to monotonic time before it is handed to
+/// the hardware timer.
+pub fn next_deadline() -> Option<TimeValue> {
+    with_current(|r| r.wheel.keys().next().map(|k| k.deadline))
+}
+
+/// Programs the hardware timer at `mono_ns`, overriding any earlier deadline.
+///
+/// Used by the periodic tick handler; sleep deadlines go through the
+/// "earliest wins" path in [`TimerRuntime::add`] instead.
+#[cfg(feature = "irq")]
+pub fn set_armed_timer(mono_ns: u64) {
+    with_current(|r| {
+        r.armed = mono_ns;
+        axhal::time::set_oneshot_timer(mono_ns);
+    });
 }
 
 /// Future returned by `sleep` and `sleep_until`.

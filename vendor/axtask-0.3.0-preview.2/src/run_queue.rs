@@ -180,6 +180,10 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
 }
 
 /// [`AxRunQueue`] represents a run queue for global system or a specific CPU.
+/// Number of real-time priority levels; index 0 is unused (priority 0 means a
+/// normal task, which never enters the real-time buckets).
+pub(crate) const RT_PRIO_LEVELS: usize = 100;
+
 pub(crate) struct AxRunQueue {
     /// The ID of the CPU this run queue is associated with.
     cpu_id: usize,
@@ -187,6 +191,9 @@ pub(crate) struct AxRunQueue {
     /// Since irq and preempt are preserved by the kernel guard hold by `AxRunQueueRef`,
     /// we just use a simple raw spin lock here.
     scheduler: SpinRaw<Scheduler>,
+    /// Ready real-time tasks, bucketed by priority. A task in a higher bucket is
+    /// always picked before the normal scheduler is consulted.
+    rt: [VecDeque<AxTaskRef>; RT_PRIO_LEVELS],
 }
 
 /// A reference to the run queue with specific guard.
@@ -238,7 +245,11 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
             self.inner.cpu_id
         );
         assert!(task.is_ready());
-        self.inner.scheduler.lock().add_task(task);
+        if task.is_realtime() {
+            self.inner.rt_push(task);
+        } else {
+            self.inner.scheduler.lock().add_task(task);
+        }
     }
 
     /// Unblock one task by inserting it into the run queue.
@@ -247,6 +258,8 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
     /// which means the task is already unblocked by other cores.
     pub fn unblock_task(&mut self, task: AxTaskRef, resched: bool) {
         let task_id_name = task.id_name();
+        // Compare before the reference is moved into the run queue.
+        let higher_priority = task.should_preempt_current();
         // Try to change the state of the task from `Blocked` to `Ready`,
         // if successful, the task will be put into this run queue,
         // otherwise, the task is already unblocked by other cores.
@@ -261,7 +274,7 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
             debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
             // Note: when the task is unblocked on another CPU's run queue,
             // we just ingiore the `resched` flag.
-            if resched && cpu_id == this_cpu_id() {
+            if (resched || higher_priority) && cpu_id == this_cpu_id() {
                 #[cfg(feature = "preempt")]
                 crate::current().set_preempt_pending(true);
             }
@@ -274,6 +287,11 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     #[cfg(feature = "irq")]
     pub fn scheduler_timer_tick(&mut self) {
         let curr = &self.current_task;
+        // Real-time tasks are not time-sliced by the round-robin scheduler: they
+        // keep the CPU until they block or a higher priority task becomes ready.
+        if curr.is_realtime() {
+            return;
+        }
         if !curr.is_idle() && self.inner.scheduler.lock().task_tick(curr) {
             #[cfg(feature = "preempt")]
             curr.set_preempt_pending(true);
@@ -440,7 +458,22 @@ impl AxRunQueue {
         Self {
             cpu_id,
             scheduler: SpinRaw::new(scheduler),
+            rt: [const { VecDeque::new() }; RT_PRIO_LEVELS],
         }
+    }
+
+    /// Inserts a real-time task into the ready bucket of its priority.
+    fn rt_push(&mut self, task: AxTaskRef) {
+        let prio = (task.rt_priority() as usize).min(RT_PRIO_LEVELS - 1);
+        self.rt[prio].push_back(task);
+    }
+
+    /// Pops the highest priority real-time task, if there is any.
+    fn rt_pop(&mut self) -> Option<AxTaskRef> {
+        self.rt
+            .iter_mut()
+            .rev()
+            .find_map(|bucket| bucket.pop_front())
     }
 
     /// Puts target task into current run queue with `Ready` state
@@ -478,10 +511,16 @@ impl AxRunQueue {
                     core::hint::spin_loop();
                 }
             }
-            // TODO: priority
             #[cfg(feature = "smp")]
             task.set_cpu_id(self.cpu_id as _);
-            self.scheduler.lock().put_prev_task(task, preempt);
+            if task.is_realtime() {
+                // Real-time tasks never enter the round-robin queue, they are
+                // re-inserted by priority so that `resched()` picks them ahead
+                // of every normal task.
+                self.rt_push(task);
+            } else {
+                self.scheduler.lock().put_prev_task(task, preempt);
+            }
             true
         } else {
             false
@@ -491,14 +530,19 @@ impl AxRunQueue {
     /// Core reschedule subroutine.
     /// Pick the next task to run and switch to it.
     fn resched(&mut self) {
-        let next = self
-            .scheduler
-            .lock()
-            .pick_next_task()
-            .unwrap_or_else(|| unsafe {
-                // Safety: IRQs must be disabled at this time.
-                IDLE_TASK.current_ref_raw().get_unchecked().clone()
-            });
+        // Real-time tasks always win, the normal scheduler is consulted only
+        // when no real-time task is ready.
+        let next = if let Some(task) = self.rt_pop() {
+            task
+        } else {
+            self.scheduler
+                .lock()
+                .pick_next_task()
+                .unwrap_or_else(|| unsafe {
+                    // Safety: IRQs must be disabled at this time.
+                    IDLE_TASK.current_ref_raw().get_unchecked().clone()
+                })
+        };
         assert!(
             next.is_ready(),
             "next {} is not ready: {:?}",

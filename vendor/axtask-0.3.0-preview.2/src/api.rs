@@ -16,7 +16,7 @@ pub use crate::task::{AxTaskExt, TaskExt};
 pub use crate::timers::register_timer_callback;
 #[doc(cfg(feature = "multitask"))]
 pub use crate::{
-    task::{CurrentTask, TaskId, TaskInner, TaskState},
+    task::{CurrentTask, SCHED_FIFO, SCHED_OTHER, SCHED_RR, TaskId, TaskInner, TaskState},
     wait_queue::WaitQueue,
 };
 
@@ -114,12 +114,31 @@ pub fn init_scheduler_secondary() {
 #[cfg(feature = "irq")]
 #[doc(cfg(feature = "irq"))]
 pub fn on_timer_tick() {
-    use kernel_guard::NoOp;
+    wake_expired_timers();
+    scheduler_tick();
+}
+
+/// Wakes up all tasks whose sleep deadline has expired on the current CPU.
+///
+/// This is called on every timer interrupt, including the ones that are armed
+/// before a periodic tick because some task asked for a shorter sleep. It does
+/// not touch the scheduler's time-slice accounting, so a sub-tick wake-up does
+/// not count as one extra tick.
+#[cfg(feature = "irq")]
+pub fn wake_expired_timers() {
     crate::timers::check_events();
+}
+
+/// Advances the scheduler time-slice accounting by one periodic tick.
+#[cfg(feature = "irq")]
+pub fn scheduler_tick() {
+    use kernel_guard::NoOp;
     // Since irq and preemption are both disabled here,
     // we can get current run queue with the default `kernel_guard::NoOp`.
     current_run_queue::<NoOp>().scheduler_timer_tick();
 }
+
+pub use crate::future::{next_deadline, set_armed_timer};
 
 /// Adds the given task to the run queue, returns the task reference.
 pub fn spawn_task(task: TaskInner) -> AxTaskRef {

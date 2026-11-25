@@ -43,7 +43,11 @@ impl Wake for AxWaker {
         if let Some(task) = self.task.upgrade() {
             let mut rq = select_run_queue::<NoPreemptIrqSave>(&task);
             *self.woke.lock() = true;
-            rq.unblock_task(task, false);
+            // A woken task with a higher real-time priority than the running
+            // one must preempt it right away, otherwise it would only run
+            // after the running task used up its time slice.
+            let preempt = task.should_preempt_current();
+            rq.unblock_task(task, preempt);
         }
     }
 }

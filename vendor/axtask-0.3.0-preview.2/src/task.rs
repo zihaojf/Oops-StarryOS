@@ -55,11 +55,23 @@ pub trait TaskExt {
 }
 
 /// The inner task structure.
+/// Normal time-sharing policy.
+pub const SCHED_OTHER: u8 = 0;
+/// First-in-first-out real-time policy.
+pub const SCHED_FIFO: u8 = 1;
+/// Round-robin real-time policy.
+pub const SCHED_RR: u8 = 2;
+
 pub struct TaskInner {
     id: TaskId,
     name: SpinNoIrq<String>,
     is_idle: bool,
     is_init: bool,
+
+    /// Scheduling policy, one of [`SCHED_OTHER`], [`SCHED_FIFO`], [`SCHED_RR`].
+    sched_policy: AtomicU8,
+    /// Real-time priority in `1..=99`; zero for normal tasks.
+    rt_priority: AtomicU8,
 
     entry: Cell<Option<Box<dyn FnOnce()>>>,
     state: AtomicU8,
@@ -267,6 +279,9 @@ impl TaskInner {
             is_init: false,
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
+            // Tasks are normal time-sharing tasks unless they ask for more.
+            sched_policy: AtomicU8::new(SCHED_OTHER),
+            rt_priority: AtomicU8::new(0),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(crate::api::cpu_mask_full()),
             cpu_id: AtomicU32::new(0),
@@ -356,6 +371,44 @@ impl TaskInner {
     #[inline]
     pub(crate) const fn is_idle(&self) -> bool {
         self.is_idle
+    }
+
+    /// Returns the scheduling policy of this task.
+    #[inline]
+    pub fn sched_policy(&self) -> u8 {
+        self.sched_policy.load(Ordering::Acquire)
+    }
+
+    /// Returns the real-time priority of this task, zero for normal tasks.
+    #[inline]
+    pub fn rt_priority(&self) -> u8 {
+        self.rt_priority.load(Ordering::Acquire)
+    }
+
+    /// Returns whether this task is scheduled with a real-time policy.
+    #[inline]
+    pub fn is_realtime(&self) -> bool {
+        matches!(self.sched_policy(), SCHED_FIFO | SCHED_RR)
+    }
+
+    /// Sets the scheduling policy and the real-time priority of this task.
+    ///
+    /// Normal tasks always have priority 0, real-time tasks use `1..=99`.
+    pub fn set_sched_param(&self, policy: u8, prio: u8) {
+        self.sched_policy.store(policy, Ordering::Release);
+        let prio = if policy == SCHED_OTHER { 0 } else { prio };
+        self.rt_priority.store(prio, Ordering::Release);
+    }
+
+    /// Returns whether this task should preempt the running task as soon as it
+    /// becomes runnable again.
+    ///
+    /// This is what bounds wake-up latency for real-time threads: a task that
+    /// is only woken up but never preempts has to wait for the running task to
+    /// use up its time slice.
+    pub(crate) fn should_preempt_current(&self) -> bool {
+        let curr = crate::current();
+        curr.is_idle() || self.rt_priority() > curr.rt_priority()
     }
 
     #[inline]

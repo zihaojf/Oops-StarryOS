@@ -15,7 +15,11 @@ use super::{
     AddrSpace, Backend, BackendOps, PopulateCallback, alloc_frame, dealloc_frame, pages_in,
 };
 
-struct FrameRefCnt(u8);
+/// Shared frame reference counter.
+///
+/// The counter has to survive hundreds of fork() calls (hackbench creates up
+/// to 400 tasks), so it is 32 bits wide instead of 8.
+struct FrameRefCnt(u32);
 
 impl FrameRefCnt {
     // This function may lock FRAME_TABLE again, so the caller should drop the lock first.
@@ -39,7 +43,7 @@ struct FrameTableRefCount {
 }
 
 impl FrameTableRefCount {
-    const INITIAL_CNT: u8 = 1;
+    const INITIAL_CNT: u32 = 1;
 
     const fn new() -> Self {
         Self {
@@ -245,20 +249,35 @@ impl BackendOps for CowBackend {
                     let frame = FRAME_TABLE
                         .lock()
                         .get_frame_ref(paddr)
-                        .ok_or(AxError::BadAddress)?;
+                        .ok_or_else(|| {
+                            warn!("cow clone: no frame ref for {paddr:?} at {vaddr:?}");
+                            AxError::BadAddress
+                        })?;
                     let mut frame = frame.lock();
                     assert!(frame.0 > 0, "referencing unreferenced frame");
-                    frame.0 += 1;
-                    if frame.0 == u8::MAX {
-                        warn!("frame reference count overflow");
+                    if frame.0 == u32::MAX {
+                        warn!("cow clone: frame refcount overflow for {paddr:?} at {vaddr:?}");
                         return Err(AxError::BadAddress);
                     }
-                    old_pt.protect(vaddr, cow_flags)?;
-                    new_pt.map(vaddr, paddr, self.size, cow_flags)?;
+                    frame.0 += 1;
+                    let mapped = old_pt
+                        .protect(vaddr, cow_flags)
+                        .and_then(|_| new_pt.map(vaddr, paddr, self.size, cow_flags));
+                    if let Err(e) = mapped {
+                        // Give the extra reference back, otherwise a failed
+                        // fork leaks one reference per page and slowly drives
+                        // the counter to its limit.
+                        frame.drop_frame(paddr, self.size);
+                        warn!("cow clone: cannot map {vaddr:?}: {e:?}");
+                        return Err(e.into());
+                    }
                 }
                 // If the page is not mapped, skip it.
                 Err(PagingError::NotMapped) => {}
-                Err(_) => return Err(AxError::BadAddress),
+                Err(e) => {
+                    warn!("cow clone: page table query failed at {vaddr:?}: {e:?}");
+                    return Err(AxError::BadAddress);
+                }
             };
         }
 

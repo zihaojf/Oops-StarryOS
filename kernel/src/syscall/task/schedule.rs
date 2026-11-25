@@ -1,17 +1,17 @@
 use axerrno::{AxError, AxResult};
 use axhal::time::TimeValue;
 use axtask::{
-    AxCpuMask, current,
+    AxCpuMask, AxTaskRef, current,
     future::{block_on, interruptible, sleep},
 };
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, PRIO_PGRP, PRIO_PROCESS, PRIO_USER,
-    SCHED_RR, TIMER_ABSTIME, timespec,
+    SCHED_FIFO, SCHED_RR, TIMER_ABSTIME, timespec,
 };
 use starry_vm::{VmMutPtr, VmPtr, vm_load, vm_write_slice};
 
 use crate::{
-    task::{get_process_data, get_process_group},
+    task::{get_process_data, get_process_group, get_task},
     time::TimeValueLike,
 };
 
@@ -127,15 +127,66 @@ pub fn sys_sched_setaffinity(
     Ok(0)
 }
 
-pub fn sys_sched_getscheduler(_pid: i32) -> AxResult<isize> {
-    Ok(SCHED_RR as _)
+/// `struct sched_param` carries a single `int` on Linux, so the pointer is
+/// read and written as `i32`.
+const SCHED_RESET_ON_FORK: i32 = 0x4000_0000;
+
+/// Normal time-sharing policy. It is 0 on Linux, but `linux_raw_sys` does
+/// not export it, so it is defined here.
+const SCHED_OTHER: u32 = 0;
+
+fn task_for_sched_call(pid: i32) -> AxResult<AxTaskRef> {
+    get_task(pid as _)
 }
 
-pub fn sys_sched_setscheduler(_pid: i32, _policy: i32, _param: *const ()) -> AxResult<isize> {
+pub fn sys_sched_getscheduler(pid: i32) -> AxResult<isize> {
+    let task = task_for_sched_call(pid)?;
+    let policy = match task.sched_policy() {
+        axtask::SCHED_FIFO => SCHED_FIFO,
+        axtask::SCHED_RR => SCHED_RR,
+        _ => SCHED_OTHER,
+    };
+    Ok(policy as isize)
+}
+
+pub fn sys_sched_setscheduler(pid: i32, policy: i32, param: *const i32) -> AxResult<isize> {
+    let policy = policy & !SCHED_RESET_ON_FORK;
+    let prio = match param.nullable() {
+        Some(p) => p.vm_read()?,
+        None => 0,
+    };
+
+    let (kernel_policy, kernel_prio) = match policy as u32 {
+        SCHED_FIFO => {
+            if !(1..=99).contains(&prio) {
+                return Err(AxError::InvalidInput);
+            }
+            (axtask::SCHED_FIFO, prio as u8)
+        }
+        SCHED_RR => {
+            if !(1..=99).contains(&prio) {
+                return Err(AxError::InvalidInput);
+            }
+            (axtask::SCHED_RR, prio as u8)
+        }
+        SCHED_OTHER => {
+            if prio != 0 {
+                return Err(AxError::InvalidInput);
+            }
+            (axtask::SCHED_OTHER, 0)
+        }
+        _ => return Err(AxError::InvalidInput),
+    };
+
+    task_for_sched_call(pid)?.set_sched_param(kernel_policy, kernel_prio);
     Ok(0)
 }
 
-pub fn sys_sched_getparam(_pid: i32, _param: *mut ()) -> AxResult<isize> {
+pub fn sys_sched_getparam(pid: i32, param: *mut i32) -> AxResult<isize> {
+    let task = task_for_sched_call(pid)?;
+    if let Some(p) = param.nullable() {
+        p.vm_write(task.rt_priority() as i32)?;
+    }
     Ok(0)
 }
 

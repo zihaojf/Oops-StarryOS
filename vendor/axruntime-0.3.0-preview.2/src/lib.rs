@@ -351,24 +351,57 @@ fn init_interrupt() {
     const PERIODIC_INTERVAL_NANOS: u64 =
         axhal::time::NANOS_PER_SEC / axconfig::TICKS_PER_SEC as u64;
 
+    /// Absolute monotonic time (in ns) of the next periodic tick.
     #[percpu::def_percpu]
-    static NEXT_DEADLINE: u64 = 0;
+    static NEXT_TICK: u64 = 0;
 
+    /// Handles one timer interrupt: wakes expired sleepers, advances the
+    /// periodic tick when it is due, then re-arms the hardware timer at the
+    /// earliest of the next tick and the earliest task sleep deadline.
     fn update_timer() {
         let now_ns = axhal::time::monotonic_time_nanos();
-        // Safety: we have disabled preemption in IRQ handler.
-        let mut deadline = unsafe { NEXT_DEADLINE.read_current_raw() };
-        if now_ns >= deadline {
-            deadline = now_ns + PERIODIC_INTERVAL_NANOS;
+
+        // Safety: interrupts are disabled in the IRQ handler.
+        let mut next_tick = unsafe { NEXT_TICK.read_current_raw() };
+        let is_tick = now_ns >= next_tick;
+        if is_tick {
+            next_tick = now_ns + PERIODIC_INTERVAL_NANOS;
+            unsafe { NEXT_TICK.write_current_raw(next_tick) };
         }
-        unsafe { NEXT_DEADLINE.write_current_raw(deadline + PERIODIC_INTERVAL_NANOS) };
+
+        #[cfg(feature = "multitask")]
+        {
+            // Waking sleepers on every timer interrupt is what gives sub-tick
+            // (e.g. 1 ms) sleep accuracy. The periodic tick below only drives
+            // the scheduler's time-slice accounting, so a wake-up armed in
+            // between two ticks does not count as an extra tick.
+            axtask::wake_expired_timers();
+            if is_tick {
+                axtask::scheduler_tick();
+            }
+        }
+
+        // `next_deadline` lives in the `wall_time()` base, the hardware timer
+        // expects monotonic nanoseconds.
+        #[cfg(feature = "multitask")]
+        let task_deadline = axtask::next_deadline().map(|d| {
+            (d.as_nanos() as u64).saturating_sub(axhal::time::epochoffset_nanos())
+        });
+        #[cfg(not(feature = "multitask"))]
+        let task_deadline: Option<u64> = None;
+
+        let deadline = task_deadline.map_or(next_tick, |d| next_tick.min(d));
+        // Keep at least 1 us so that an already expired deadline does not
+        // re-trigger the interrupt in a tight loop.
+        let deadline = deadline.max(now_ns + 1_000);
+        #[cfg(feature = "multitask")]
+        axtask::set_armed_timer(deadline);
+        #[cfg(not(feature = "multitask"))]
         axhal::time::set_oneshot_timer(deadline);
     }
 
     axhal::irq::register(axhal::time::irq_num(), || {
         update_timer();
-        #[cfg(feature = "multitask")]
-        axtask::on_timer_tick();
     });
 
     #[cfg(feature = "ipi")]
