@@ -125,10 +125,24 @@ impl TimeIf for TimeIfImpl {
     fn set_oneshot_timer(deadline_ns: u64) {
         use loongArch64::register::tcfg;
 
+        // `TCFG.InitVal` is only 30 bits wide (bits [31:2], four-tick
+        // granularity) and the countdown is relative, so:
+        //  - a deadline that has already passed underflows `u64` and arms a
+        //    counter that effectively never expires: no further timer
+        //    interrupts, and every sleeper stays asleep forever;
+        //  - a deadline farther than `MAX_INIT_TICKS` away is silently
+        //    truncated, which made long `nanosleep`/`timeout` calls fire at an
+        //    arbitrary moment.
+        // Guard the underflow and arm in chunks: the timer interrupt handler
+        // re-arms with the remaining time until the real deadline is reached.
+        const MAX_INIT_TICKS: u64 = (1 << 30) - 4;
+
         let ticks_now = Self::current_ticks();
         let ticks_deadline = Self::nanos_to_ticks(deadline_ns);
-        let init_value = ticks_deadline - ticks_now;
-        tcfg::set_init_val(init_value as _);
+        let delta = ticks_deadline
+            .saturating_sub(ticks_now)
+            .clamp(4, MAX_INIT_TICKS);
+        tcfg::set_init_val(delta as _);
         tcfg::set_en(true);
     }
 }
