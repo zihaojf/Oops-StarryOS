@@ -252,51 +252,58 @@ echo "#### StarryOS: tests only=\"${TEST_ONLY:-all}\" skip=\"${TEST_SKIP:-none}\
 
 prepare_environment
 
-# Suites are grouped by stability so a hang in a later suite never blocks
-# earlier ones: cheap functional points first, the network suites next, the
-# long benchmarks after them and the risky ones last.  Both architectures run
-# the same list now -- LoongArch64 used to skip iozone/unixbench/libctest/
-# cyclictest because `busybox timeout` could not interrupt a hung guest there,
-# but the timer chain (IS line dispatch, TCFG one-shot guard, timer-wheel
-# arming) is fixed, so the workaround is gone.
-SAFE_ORDER="basic_testcode.sh busybox_testcode.sh lua_testcode.sh libcbench_testcode.sh"
-NET_ORDER="iperf_testcode.sh netperf_testcode.sh"
-PERF_ORDER="iozone_testcode.sh unixbench_testcode.sh"
-RISKY_ORDER="libctest_testcode.sh cyclictest_testcode.sh"
+# Suites are ordered by "value per second, most fragile last", because a single
+# stalled guest costs every suite that would have run after it.  Ordering is
+# also why libctest is not in the tail any more: it is worth ~390 points across
+# the four environments, cost far more than the 240 s it used to get, and it was
+# lost entirely when the (slow) iozone benchmark stalled the guest on
+# LoongArch64.  unixbench is not part of the judge list at all, so it is gone.
+#
+#   1. fast, reliable              basic / busybox / lua / libcbench
+#   2. expensive but high value    libctest (600 s), cyclictest
+#   3. cheap network suites        iperf / netperf
+#   4. slow benchmarks, last       iozone (900 s)
+#
+# `run_pass <per-script timeout> <scripts...>` keeps the passes uniform.
+run_pass() {
+    _limit=$1
+    shift
+    for d in $TESTDIRS; do
+        for s in "$@"; do
+            [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" "$_limit"
+        done
+    done
+}
 
 # The LTP set is the slowest one (2800+ cases), so it runs last with a much
-# larger per-script timeout.  Same form as the passes above.
+# larger per-script timeout.
 LTP_ORDER="ltp_testcode.sh"
 
+# Watchdog on both architectures: the timer chain now works on LoongArch64 too,
+# so a stalled suite can power the guest off by itself instead of leaving the
+# platform to kill it at the two-hour limit (which loses every group that has
+# not printed its END marker).  The budget leaves room for the fastest observed
+# full run on each architecture.
 WATCHDOG_PID=""
-if [ -n "$BB" ] && [ "$ARCH" != "loongarch64" ]; then
-    ( $BB sleep 14400; echo "#### StarryOS: watchdog timeout ####"; $BB poweroff ) &
+if [ -n "$BB" ]; then
+    if [ "$ARCH" = "loongarch64" ]; then
+        WATCHDOG_SECS=3000
+    else
+        WATCHDOG_SECS=2400
+    fi
+    (
+        $BB sleep "$WATCHDOG_SECS"
+        echo "#### StarryOS: watchdog timeout after ${WATCHDOG_SECS}s ####"
+        $BB poweroff -f
+    ) &
     WATCHDOG_PID=$!
 fi
 
-for d in $TESTDIRS; do
-    for s in $SAFE_ORDER; do
-        [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 240
-    done
-done
-
-for d in $TESTDIRS; do
-    for s in $NET_ORDER; do
-        [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 240
-    done
-done
-
-for d in $TESTDIRS; do
-    for s in $PERF_ORDER; do
-        [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 600
-    done
-done
-
-for d in $TESTDIRS; do
-    for s in $RISKY_ORDER; do
-        [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 240
-    done
-done
+run_pass 240 basic_testcode.sh busybox_testcode.sh lua_testcode.sh libcbench_testcode.sh
+run_pass 600 libctest_testcode.sh
+run_pass 240 cyclictest_testcode.sh
+run_pass 240 iperf_testcode.sh netperf_testcode.sh
+run_pass 900 iozone_testcode.sh
 
 # LTP 的驱动脚本是一个无超时的裸 for 循环：它会卡在 cgroup_fj_proc（该程序用
 # sigsuspend() 等父进程信号），后面上千个用例就再也不会被执行。这里保持同样
