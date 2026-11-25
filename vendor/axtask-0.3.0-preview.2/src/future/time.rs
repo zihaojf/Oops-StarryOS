@@ -41,7 +41,13 @@ impl TimerRuntime {
     /// degrade to the tick period.
     #[cfg(feature = "irq")]
     fn arm_earliest(&mut self, mono_ns: u64) {
-        if self.armed != 0 && mono_ns >= self.armed {
+        // `armed` only mirrors what was programmed into the hardware; when the
+        // deadline it refers to has already passed, the timer has fired and the
+        // bookkeeping is stale. Treating that as "armed" would suppress every
+        // later arming and strand all sleepers in `run_idle`, so a passed
+        // deadline counts as unarmed.
+        let now = axhal::time::monotonic_time_nanos();
+        if self.armed > now && mono_ns >= self.armed {
             return;
         }
         self.armed = mono_ns;
@@ -60,10 +66,11 @@ impl TimerRuntime {
         self.wheel.insert(key, Waker::noop().clone());
         self.key += 1;
 
-        // If this sleep is now the earliest one, pull the hardware timer in so
-        // that it fires exactly at the deadline instead of at the next tick.
+        // Pull the hardware timer in so that a sub-tick sleep fires exactly at
+        // its deadline instead of at the next periodic tick. `arm_earliest`
+        // keeps whatever is already programmed if that is still earlier.
         #[cfg(feature = "irq")]
-        if self.wheel.keys().next().map(|k| k.deadline) == Some(deadline) {
+        {
             let mono_ns = (deadline.as_nanos() as u64)
                 .saturating_sub(axhal::time::epochoffset_nanos())
                 // Keep a margin of 100 us: the deadline may be in the past (then
