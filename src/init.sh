@@ -253,19 +253,16 @@ echo "#### StarryOS: tests only=\"${TEST_ONLY:-all}\" skip=\"${TEST_SKIP:-none}\
 prepare_environment
 
 # Suites are grouped by stability so a hang in a later suite never blocks
-# earlier ones.  On LoongArch64 `busybox timeout` / `sleep` cannot reliably
-# interrupt a hung guest (timer/signal issue), so known-hanging suites on LA
-# (iozone, unixbench, libctest, cyclictest) are skipped there to guarantee a
-# fast, clean completion without hitting the 2-hour platform timeout.
+# earlier ones: cheap functional points first, the network suites next, the
+# long benchmarks after them and the risky ones last.  Both architectures run
+# the same list now -- LoongArch64 used to skip iozone/unixbench/libctest/
+# cyclictest because `busybox timeout` could not interrupt a hung guest there,
+# but the timer chain (IS line dispatch, TCFG one-shot guard, timer-wheel
+# arming) is fixed, so the workaround is gone.
 SAFE_ORDER="basic_testcode.sh busybox_testcode.sh lua_testcode.sh libcbench_testcode.sh"
 NET_ORDER="iperf_testcode.sh netperf_testcode.sh"
-if [ "$ARCH" = "loongarch64" ]; then
-    PERF_ORDER=""
-    RISKY_ORDER=""
-else
-    PERF_ORDER="iozone_testcode.sh unixbench_testcode.sh"
-    RISKY_ORDER="libctest_testcode.sh cyclictest_testcode.sh"
-fi
+PERF_ORDER="iozone_testcode.sh unixbench_testcode.sh"
+RISKY_ORDER="libctest_testcode.sh cyclictest_testcode.sh"
 
 # The LTP set is the slowest one (2800+ cases), so it runs last with a much
 # larger per-script timeout.  Same form as the passes above.
