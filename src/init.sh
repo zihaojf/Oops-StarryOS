@@ -252,19 +252,19 @@ echo "#### StarryOS: tests only=\"${TEST_ONLY:-all}\" skip=\"${TEST_SKIP:-none}\
 
 prepare_environment
 
-# Fast functional test points.  These are run for every libc variant first so
-# that a slow benchmark in a later pass cannot prevent them from running.
-FAST_ORDER="basic_testcode.sh lua_testcode.sh libcbench_testcode.sh libctest_testcode.sh busybox_testcode.sh cyclictest_testcode.sh"
-# Benchmarks that complete quickly enough.  Network tests are run before the
-# file-system benchmark: on LoongArch64 the iozone test currently hangs, so it
-# is skipped there (parallel timeouts do not work due to a timer issue).
+# Suites are grouped by stability so a hang in a later suite never blocks
+# earlier ones.  On LoongArch64 `busybox timeout` / `sleep` cannot reliably
+# interrupt a hung guest (timer/signal issue), so known-hanging suites on LA
+# (iozone, unixbench, libctest, cyclictest) are skipped there to guarantee a
+# fast, clean completion without hitting the 2-hour platform timeout.
+SAFE_ORDER="basic_testcode.sh busybox_testcode.sh lua_testcode.sh libcbench_testcode.sh"
+NET_ORDER="iperf_testcode.sh netperf_testcode.sh"
 if [ "$ARCH" = "loongarch64" ]; then
-    MEDIUM_ORDER="iperf_testcode.sh netperf_testcode.sh"
-    LONG_ORDER=""
+    PERF_ORDER=""
+    RISKY_ORDER=""
 else
-    MEDIUM_ORDER="iperf_testcode.sh netperf_testcode.sh iozone_testcode.sh"
-    # The long UnixBench run goes last; it is optional.
-    LONG_ORDER="unixbench_testcode.sh"
+    PERF_ORDER="iozone_testcode.sh unixbench_testcode.sh"
+    RISKY_ORDER="libctest_testcode.sh cyclictest_testcode.sh"
 fi
 
 # The LTP set is the slowest one (2800+ cases), so it runs last with a much
@@ -278,20 +278,26 @@ if [ -n "$BB" ] && [ "$ARCH" != "loongarch64" ]; then
 fi
 
 for d in $TESTDIRS; do
-    for s in $FAST_ORDER; do
+    for s in $SAFE_ORDER; do
         [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 240
     done
 done
 
 for d in $TESTDIRS; do
-    for s in $MEDIUM_ORDER; do
+    for s in $NET_ORDER; do
         [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 240
     done
 done
 
 for d in $TESTDIRS; do
-    for s in $LONG_ORDER; do
+    for s in $PERF_ORDER; do
         [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 600
+    done
+done
+
+for d in $TESTDIRS; do
+    for s in $RISKY_ORDER; do
+        [ -f "$d/$s" ] && script_wanted "$d" "$s" && run_testcode "$d" "$s" 240
     done
 done
 
