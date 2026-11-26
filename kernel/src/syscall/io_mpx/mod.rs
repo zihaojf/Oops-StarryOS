@@ -17,8 +17,9 @@ impl Pollable for FdPollSet {
     }
 
     fn register(&self, context: &mut Context<'_>, _events: IoEvents) {
+        // HUP/ERR 必须始终能被唤醒：注册掩码 ≠ 关注位，否则“先睡后关闭”收不到唤醒。
         for (file, events) in &self.0 {
-            file.register(context, *events);
+            file.register(context, *events | IoEvents::ALWAYS_POLL);
         }
     }
 }
