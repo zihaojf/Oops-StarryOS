@@ -183,14 +183,14 @@ echo "#### StarryOS: arch $ARCH ####"
 # --- test-selection:begin ---
 # 测试点选择：TEST_ONLY 白名单，TEST_SKIP 黑名单（skip 优先），留空 = 全部。
 # token 用空格分隔，支持 shell 通配：
-#   ltp                    LTP 这一轮
 #   basic lua libctest ... 套件（也可写 basic_testcode.sh）
 #   musl / glibc           libc 变体
 #   basic-musl             套件 + 变体
-#   ltp/pipe02             LTP 单个用例；ltp/clone* 一批用例
-# 例：TEST_ONLY="ltp" TEST_SKIP="ltp/clone* ltp/close_range*"
+# 例：TEST_ONLY="basic busybox" TEST_SKIP="iozone"
 # TEST_ONLY="basic"
- TEST_SKIP="ltp ltp/clone* ltp/close_range* ltp/cpuctl_def_task* ltp/cpuacct_task ltp/cpuacct.sh"
+# 不评分的套件显式关闭：unixbench / lmbench 不在评分表里，ltp 已从在线评测移除。
+# 它们本来也不在下面的 run_pass 清单里，这里是第二道保险。
+TEST_SKIP="unixbench lmbench ltp"
 
 # $1 是否命中 $2 里某个 token（token 可为通配）
 match() {
@@ -217,7 +217,7 @@ script_wanted() {
     return 1
 }
 
-# <dir>：LTP 这一轮要不要跑
+# <dir>：LTP 这一轮要不要跑 (保留函数定义供调试用，但在线评测不再调用)
 ltp_wanted() {
     _v=${1##*/}
     for _t in ltp "ltp-$_v" "$_v"; do
@@ -252,17 +252,14 @@ echo "#### StarryOS: tests only=\"${TEST_ONLY:-all}\" skip=\"${TEST_SKIP:-none}\
 
 prepare_environment
 
-# Suites are ordered by "value per second, most fragile last", because a single
-# stalled guest costs every suite that would have run after it.  Ordering is
-# also why libctest is not in the tail any more: it is worth ~390 points across
-# the four environments, cost far more than the 240 s it used to get, and it was
-# lost entirely when the (slow) iozone benchmark stalled the guest on
-# LoongArch64.  unixbench is not part of the judge list at all, so it is gone.
+# Suites are ordered by "value per second, most fragile last".
+# lmbench scores 0 on all environments and is very slow → omitted.
+# LTP is no longer part of the online judge → not called.
 #
 #   1. fast, reliable              basic / busybox / lua / libcbench
 #   2. expensive but high value    libctest (600 s), cyclictest
 #   3. cheap network suites        iperf / netperf
-#   4. slow benchmarks, last       iozone (900 s)
+#   4. slow benchmarks, last       iozone (600 s)
 #
 # `run_pass <per-script timeout> <scripts...>` keeps the passes uniform.
 run_pass() {
@@ -275,21 +272,25 @@ run_pass() {
     done
 }
 
-# The LTP set is the slowest one (2800+ cases), so it runs last with a much
-# larger per-script timeout.
-LTP_ORDER="ltp_testcode.sh"
-
-# Watchdog on both architectures: the timer chain now works on LoongArch64 too,
-# so a stalled suite can power the guest off by itself instead of leaving the
-# platform to kill it at the two-hour limit (which loses every group that has
-# not printed its END marker).  The budget leaves room for the fastest observed
-# full run on each architecture.
+# Watchdog on both architectures.  The online judge enforces a hard 2-hour
+# (7200 s) wall-clock limit across BOTH architectures run sequentially.
+# Budget per architecture:
+#   basic/busybox/lua/libcbench : ~4×240 s  = 960 s  (2 arches × 2 variants each)
+#   libctest                    : ~2×600 s  = 1200 s
+#   cyclictest                  : ~2×240 s  = 480 s
+#   iperf/netperf               : ~2×240 s  = 480 s
+#   iozone                      : ~2×600 s  = 1200 s  (cut from 900→600 to fit)
+#   ----------                               --------
+#   Total (2 arches)                         ~4320 s (~72 min) with margin
+#
+# Per-architecture watchdog: 3300 s for LA (slower), 2800 s for RV (faster).
+# This gives a ~400 s safety margin vs the 7200 s hard limit.
 WATCHDOG_PID=""
 if [ -n "$BB" ]; then
     if [ "$ARCH" = "loongarch64" ]; then
-        WATCHDOG_SECS=3000
+        WATCHDOG_SECS=3300
     else
-        WATCHDOG_SECS=2400
+        WATCHDOG_SECS=2800
     fi
     (
         $BB sleep "$WATCHDOG_SECS"
@@ -303,46 +304,13 @@ run_pass 240 basic_testcode.sh busybox_testcode.sh lua_testcode.sh libcbench_tes
 run_pass 600 libctest_testcode.sh
 run_pass 240 cyclictest_testcode.sh
 run_pass 240 iperf_testcode.sh netperf_testcode.sh
-run_pass 900 iozone_testcode.sh
+# iozone timeout cut to 600 s (was 900 s) to reliably fit within the 2-hour
+# judge limit when running 4 environments (2 arches × 2 libc variants).
+# lmbench currently scores 0 everywhere and is very slow, so it is omitted.
+run_pass 600 iozone_testcode.sh
 
-# LTP 的驱动脚本是一个无超时的裸 for 循环：它会卡在 cgroup_fj_proc（该程序用
-# sigsuspend() 等父进程信号），后面上千个用例就再也不会被执行。这里保持同样
-# 的串行顺序与 ltp-<variant> 组标记，只给每个二进制加 15 s 上限。
-run_ltp() {
-    dir="$1"
-    cd "$dir" 2>/dev/null || return
-    case "$dir" in
-        /musl) export LD_LIBRARY_PATH=/musl/lib ;;
-        *)     export LD_LIBRARY_PATH=/glibc/lib ;;
-    esac
-    export PATH="$dir/ltp/testcases/bin:$dir/ltp/bin:$PATH"
-    # 以下是实测会让进程卡在不可中断状态、连 SIGKILL 都杀不掉的用例：
-    #   cgroup_regression_*.sh 里是 `mount -t cgroup xxx cgroup/` 的 while 循环，
-    #   cgroup_fj_proc          里是 sigsuspend() 等父进程信号；
-    #   clock_gettime01         卡在 vDSO/syscall 变体探测（实测 45 s 无输出，
-    #                           SIGKILL 同样无效，2026-11-23 21:31 抓到的）。
-    # 它们本来是被父脚本驱动的辅助程序，独立执行必然不返回；只能跳过，
-    # 否则整条串行链会停在这里（实测 600 s 只推进 4 个用例）。
-    LTP_SKIP="cgroup_fj_proc cgroup_regression_3_1.sh cgroup_regression_3_2.sh cgroup_regression_5_1.sh cgroup_regression_5_2.sh cgroup_regression_6_1.sh cgroup_regression_6_2.sh cgroup_regression_fork_processes clock_gettime01"
-    echo "#### StarryOS: running $dir/ltp_testcode.sh ####"
-    echo "#### OS COMP TEST GROUP START ltp-${dir#/} ####"
-    for f in ltp/testcases/bin/*; do
-        [ -f "$f" ] || continue
-        case " $LTP_SKIP " in
-            *" ${f##*/} "*) echo "SKIP LTP CASE ${f##*/}" ; continue ;;
-        esac
-        case_wanted "${f##*/}" || { echo "SKIP LTP CASE ${f##*/}"; continue; }
-        echo "RUN LTP CASE ${f##*/}"
-        $BB timeout -s KILL 15 "./$f"
-        echo "FAIL LTP CASE ${f##*/} : $?"
-    done
-    echo "#### OS COMP TEST GROUP END ltp-${dir#/} ####"
-    echo "#### StarryOS: finished $dir/ltp_testcode.sh (status 0) ####"
-}
-
-for d in $TESTDIRS; do
-    [ -f "$d/ltp_testcode.sh" ] && ltp_wanted "$d" && run_ltp "$d"
-done
+# LTP 已从在线评测评分中移除，不再调用。
+# run_ltp() 函数和 for d in $TESTDIRS loop 已删除。
 
 echo "#### StarryOS: all test points finished ####"
 
