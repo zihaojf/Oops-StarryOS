@@ -229,6 +229,8 @@ impl Pollable for Pipe {
             events.set(IoEvents::HUP, self.closed());
         } else {
             events.set(IoEvents::OUT, buf.vacant_len() > 0);
+            // 读端全部关闭：即使管道已满也要让 write 集合立刻就绪（随后 write 得到 EPIPE）。
+            events.set(IoEvents::ERR, self.closed());
         }
         events
     }
