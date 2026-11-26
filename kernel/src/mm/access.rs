@@ -280,15 +280,8 @@ pub fn vm_load_string(ptr: *const c_char) -> AxResult<String> {
     String::from_utf8(bytes).map_err(|_| AxError::IllegalBytes)
 }
 
-/// User-memory buffer view used by the `axio` read/write adapters.
-///
-/// It intentionally holds **no** guard: the adapters live across
-/// `block_on(poll_io(..))` in the file/pipe paths, and keeping interrupts
-/// disabled for that whole lifetime deadlocks the executor whenever an
-/// operation has to wait (the timer interrupt that wakes the sleeper can never
-/// be delivered). The IRQ-off window is scoped to the `user_copy` call itself.
 #[allow(dead_code)]
-struct Vm;
+struct Vm(IrqSave);
 
 /// Briefly checks if the given memory region is valid user memory.
 pub fn check_access(start: usize, len: usize) -> VmResult {
@@ -304,19 +297,14 @@ pub fn check_access(start: usize, len: usize) -> VmResult {
 #[extern_trait]
 unsafe impl VmIo for Vm {
     fn new() -> Self {
-        Self
+        Self(IrqSave::new())
     }
 
     fn read(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> VmResult {
         check_access(start, buf.len())?;
-        let failed_at = {
-            // IRQs off only while touching user memory: the copy may fault and
-            // the fixup path must not be re-entered from an interrupt.
-            let _guard = IrqSave::new();
-            access_user_memory(|| unsafe {
-                user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
-            })
-        };
+        let failed_at = access_user_memory(|| unsafe {
+            user_copy(buf.as_mut_ptr() as *mut _, start as _, buf.len())
+        });
         if unlikely(failed_at != 0) {
             Err(VmError::AccessDenied)
         } else {
@@ -326,12 +314,9 @@ unsafe impl VmIo for Vm {
 
     fn write(&mut self, start: usize, buf: &[u8]) -> VmResult {
         check_access(start, buf.len())?;
-        let failed_at = {
-            let _guard = IrqSave::new();
-            access_user_memory(|| unsafe {
-                user_copy(start as _, buf.as_ptr() as *const _, buf.len())
-            })
-        };
+        let failed_at = access_user_memory(|| unsafe {
+            user_copy(start as _, buf.as_ptr() as *const _, buf.len())
+        });
         if unlikely(failed_at != 0) {
             Err(VmError::AccessDenied)
         } else {
