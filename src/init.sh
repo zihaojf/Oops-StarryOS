@@ -190,7 +190,7 @@ echo "#### StarryOS: arch $ARCH ####"
 # TEST_ONLY="basic"
 # 不评分的套件显式关闭：unixbench / lmbench 不在评分表里，ltp 已从在线评测移除。
 # 它们本来也不在下面的 run_pass 清单里，这里是第二道保险。
-TEST_SKIP="unixbench lmbench ltp"
+TEST_SKIP="unixbench lmbench ltp iozone"
 
 # $1 是否命中 $2 里某个 token（token 可为通配）
 match() {
@@ -259,7 +259,7 @@ prepare_environment
 #   1. fast, reliable              basic / busybox / lua / libcbench
 #   2. expensive but high value    libctest (600 s), cyclictest
 #   3. cheap network suites        iperf / netperf
-#   4. slow benchmarks, last       iozone (600 s)
+#   4. (iozone 已停用：只值 40 分，且是唯一把 LA 拖到 2 小时的套件)
 #
 # `run_pass <per-script timeout> <scripts...>` keeps the passes uniform.
 run_pass() {
@@ -307,7 +307,6 @@ run_pass 240 iperf_testcode.sh netperf_testcode.sh
 # iozone timeout cut to 600 s (was 900 s) to reliably fit within the 2-hour
 # judge limit when running 4 environments (2 arches × 2 libc variants).
 # lmbench currently scores 0 everywhere and is very slow, so it is omitted.
-run_pass 600 iozone_testcode.sh
 
 # LTP 已从在线评测评分中移除，不再调用。
 # run_ltp() 函数和 for d in $TESTDIRS loop 已删除。
