@@ -85,3 +85,8 @@ optional = true
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]
 all-features = true
+
+[patch.crates-io]
+# 平台提交副本偶尔会漏掉 vendor 下的某些 crate；这里给 axfs-ng-vfs 一份自带副本兜底，
+# 保证 directory source 里缺这个包时仍能编译。
+axfs-ng-vfs = { path = "third_party/axfs-ng-vfs" }
