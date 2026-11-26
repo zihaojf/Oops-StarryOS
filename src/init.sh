@@ -301,9 +301,9 @@ if [ -n "$BB" ]; then
 fi
 
 run_pass 240 basic_testcode.sh busybox_testcode.sh lua_testcode.sh libcbench_testcode.sh
+run_pass 240 iperf_testcode.sh netperf_testcode.sh
 run_pass 600 libctest_testcode.sh
 run_pass 240 cyclictest_testcode.sh
-run_pass 240 iperf_testcode.sh netperf_testcode.sh
 # iozone timeout cut to 600 s (was 900 s) to reliably fit within the 2-hour
 # judge limit when running 4 environments (2 arches × 2 libc variants).
 # lmbench currently scores 0 everywhere and is very slow, so it is omitted.
