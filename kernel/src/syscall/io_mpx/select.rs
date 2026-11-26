@@ -111,22 +111,30 @@ fn do_select(
         match block_on(future::timeout(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {
+                // `interested` 是调用方关注的集合，`raw` 是内核实际上报的事件。
+                // HUP/ERR 不能先用 `& interested` 过滤掉：Linux 的读就绪集合是
+                // IN|HUP|ERR、写就绪是 OUT|ERR，对端关闭或出错同样要立即返回，
+                // 否则 select 会一直睡到（可能不存在的）下一次就绪。
                 let mut res = 0usize;
                 for ((fd, interested), index) in fds.0.iter().zip(fd_indices.iter().copied()) {
-                    let events = fd.poll() & *interested;
-                    if events.contains(IoEvents::IN)
+                    let raw = fd.poll();
+                    if interested.contains(IoEvents::IN)
+                        && raw.intersects(IoEvents::IN | IoEvents::HUP | IoEvents::ERR)
                         && let Some(set) = readfds.as_deref_mut()
                     {
                         res += 1;
                         unsafe { FD_SET(index as _, set) };
                     }
-                    if events.contains(IoEvents::OUT)
+                    if interested.contains(IoEvents::OUT)
+                        && raw.intersects(IoEvents::OUT | IoEvents::ERR)
                         && let Some(set) = writefds.as_deref_mut()
                     {
                         res += 1;
                         unsafe { FD_SET(index as _, set) };
                     }
-                    if events.contains(IoEvents::ERR)
+                    // Linux 的 exceptfds 只对应 PRI(OOB)；这里额外保留 ERR 兼容旧行为。
+                    if interested.contains(IoEvents::ERR)
+                        && raw.intersects(IoEvents::ERR | IoEvents::PRI)
                         && let Some(set) = exceptfds.as_deref_mut()
                     {
                         res += 1;
