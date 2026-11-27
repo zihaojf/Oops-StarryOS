@@ -81,10 +81,12 @@ pub fn sys_clone3(uctx: &UserContext, args: *const u8, size: usize) -> AxResult<
     }
 
     let mut buffer = [0u8; core::mem::size_of::<Clone3Args>()];
+    // Linux 语义：size 大于已知结构时只读取已知部分，忽略新增字段。
+    let copy_len = size.min(buffer.len());
     // SAFETY: MaybeUninit<T> is compatible with T, and we're filling in the
     // buffer with bytes read from the user
     vm_read_slice(args, unsafe {
-        mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buffer[..size])
+        mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buffer[..copy_len])
     })?;
     let clone3_args: Clone3Args =
         bytemuck::try_pod_read_unaligned(&buffer).map_err(|_| AxError::InvalidInput)?;
