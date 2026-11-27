@@ -839,6 +839,7 @@ run_ltp() {
         esac
         echo "RUN LTP CASE $_case"
         $BB timeout -s KILL 60 "./ltp/testcases/bin/$_case"
+        echo "FAIL LTP CASE $_case : $?"
     done < "$LTP_ALLOW"
     echo "#### OS COMP TEST GROUP END ltp-glibc ####"
     echo "#### StarryOS: finished $dir/ltp (allowlist) ####"
