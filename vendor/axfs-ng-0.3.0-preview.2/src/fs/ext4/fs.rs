@@ -1,9 +1,13 @@
 use alloc::sync::Arc;
-use core::cell::OnceCell;
+use core::{
+    cell::OnceCell,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use axdriver::AxBlockDevice;
 use axfs_ng_vfs::{
-    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, path::MAX_NAME_LEN,
+    DirEntry, DirNode, Filesystem, FilesystemOps, Reference, StatFs, VfsResult, Metadata, path::MAX_NAME_LEN,
 };
 use kspin::{SpinNoPreempt as Mutex, SpinNoPreemptGuard as MutexGuard};
 use lwext4_rust::{FsConfig, ffi::EXT4_ROOT_INO};
@@ -18,6 +22,8 @@ const EXT4_CONFIG: FsConfig = FsConfig { bcache_size: 256 };
 pub struct Ext4Filesystem {
     inner: Mutex<LwExt4Filesystem>,
     root_dir: OnceCell<DirEntry>,
+    revision: AtomicUsize,
+    metadata_cache: spin::Mutex<lru::LruCache<u32, (usize, Metadata)>>,
 }
 
 impl Ext4Filesystem {
@@ -28,6 +34,8 @@ impl Ext4Filesystem {
         let fs = Arc::new(Self {
             inner: Mutex::new(ext4),
             root_dir: OnceCell::new(),
+            revision: AtomicUsize::new(0),
+            metadata_cache: spin::Mutex::new(lru::LruCache::new(NonZeroUsize::new(256).unwrap())),
         });
         let _ = fs.root_dir.set(DirEntry::new_dir(
             |this| DirNode::new(Inode::new(fs.clone(), EXT4_ROOT_INO, Some(this))),
@@ -38,6 +46,30 @@ impl Ext4Filesystem {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, LwExt4Filesystem> {
         self.inner.lock()
+    }
+
+    /// Invalidate inode metadata while holding the filesystem mutation lock.
+    pub(crate) fn lock_for_update(&self) -> MutexGuard<'_, LwExt4Filesystem> {
+        let guard = self.inner.lock();
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        guard
+    }
+
+    /// Call with the filesystem lock held to pair metadata with a stable revision.
+    pub(crate) fn revision(&self) -> usize {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    /// Cached by inode number so metadata survives transient pathname lookups.
+    /// The caller holds the filesystem lock for both cache reads and writes.
+    pub(crate) fn cached_metadata(&self, ino: u32) -> Option<Metadata> {
+        self.metadata_cache.lock().get(&ino)
+            .filter(|(revision, _)| *revision == self.revision())
+            .map(|(_, metadata)| metadata.clone())
+    }
+
+    pub(crate) fn cache_metadata(&self, ino: u32, metadata: &Metadata) {
+        self.metadata_cache.lock().put(ino, (self.revision(), metadata.clone()));
     }
 }
 

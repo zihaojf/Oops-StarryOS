@@ -95,6 +95,16 @@ impl ProcessSignalManager {
             .contains(SignalActionFlags::RESTART)
     }
 
+    pub(crate) fn enqueue_signal(&self, sig: SignalInfo) -> bool {
+        if self.signal_ignored(sig.signo()) {
+            return false;
+        }
+        if self.pending.lock().put_signal(sig) {
+            self.possibly_has_signal.store(true, Ordering::Release);
+        }
+        true
+    }
+
     /// Sends a signal to the process.
     ///
     /// Returns `Some(tid)` if the signal wakes up a thread.
@@ -103,12 +113,8 @@ impl ProcessSignalManager {
     #[must_use]
     pub fn send_signal(&self, sig: SignalInfo) -> Option<u32> {
         let signo = sig.signo();
-        if self.signal_ignored(signo) {
+        if !self.enqueue_signal(sig) {
             return None;
-        }
-
-        if self.pending.lock().put_signal(sig) {
-            self.possibly_has_signal.store(true, Ordering::Release);
         }
         let mut result = None;
         self.children.lock().retain(|(tid, thread)| {

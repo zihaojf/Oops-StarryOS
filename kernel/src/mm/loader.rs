@@ -337,7 +337,7 @@ pub fn load_user_app(
         heap_start,
         heap_size,
         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-        true,
+        false,
         Backend::new_alloc(heap_start, PageSize::Size4K),
     )?;
 

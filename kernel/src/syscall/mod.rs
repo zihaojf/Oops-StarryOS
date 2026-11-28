@@ -18,6 +18,7 @@ pub use self::{
     fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
     time::*,
 };
+use crate::task::AsThread;
 
 pub fn handle_syscall(uctx: &mut UserContext) {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
@@ -641,6 +642,24 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         }
     };
     debug!("Syscall {sysno} return {result:?}");
+
+    // wait4 must return to userspace to deliver an interrupting handler.
+    // With SA_RESTART, save a context that re-executes the syscall after the
+    // handler returns, keeping the original wait arguments intact.
+    if sysno == Sysno::wait4 && result == Err(AxError::Interrupted) {
+        let curr = axtask::current();
+        let thr = curr.as_thread();
+        let mut pending = thr.signal.pending();
+        if let Some(signo) = pending.dequeue(&!thr.signal.blocked())
+            && (thr.proc_data.signal.can_restart(signo)
+                || thr.proc_data.signal.signal_ignored(signo))
+        {
+            let instruction_size = if cfg!(target_arch = "x86_64") { 2 } else { 4 };
+            let syscall_ip = uctx.ip() - instruction_size;
+            uctx.set_ip(syscall_ip);
+            return;
+        }
+    }
 
     uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
 }

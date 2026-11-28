@@ -377,7 +377,7 @@ struct CachedFileShared {
 impl CachedFileShared {
     pub fn new() -> Self {
         Self {
-            page_cache: Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap())),
+            page_cache: Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())),
             evict_listeners: Mutex::new(LinkedList::default()),
         }
     }
@@ -532,7 +532,9 @@ impl CachedFile {
         if self.in_memory {
             page.data().fill(0);
         } else {
-            file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
+            let read = file.read_at(page.data(), pn as u64 * PAGE_SIZE as u64)?;
+            // File-backed mappings must never expose allocator contents beyond EOF.
+            page.data()[read..].fill(0);
         }
         cache.put(pn, page);
         Ok((cache.get_mut(&pn).unwrap(), evicted))

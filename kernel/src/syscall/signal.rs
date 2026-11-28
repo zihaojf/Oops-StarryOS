@@ -16,7 +16,7 @@ use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     task::{
-        AsThread, block_next_signal, check_signals, processes, send_signal_to_process,
+        AsThread, block_next_signal, check_signals, get_task, processes, send_signal_to_process,
         send_signal_to_process_group, send_signal_to_thread,
     },
     time::TimeValueLike,
@@ -116,7 +116,18 @@ pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
 
     match pid {
         1.. => {
-            send_signal_to_process(pid as _, sig)?;
+            let curr = current();
+            let thr = curr.as_thread();
+            if pid as Pid == thr.proc_data.proc.pid() {
+                if let Some(sig) = sig
+                    && let Some(tid) = thr.signal.send_to_own_process(sig)
+                    && let Ok(task) = get_task(tid)
+                {
+                    task.interrupt();
+                }
+            } else {
+                send_signal_to_process(pid as _, sig)?;
+            }
         }
         0 => {
             let pgid = current().as_thread().proc_data.proc.group().pgid();
@@ -256,8 +267,8 @@ pub fn sys_rt_sigtimedwait(
         return Err(AxError::WouldBlock);
     };
     let Some(sig) = sig else {
-        // Interrupted
-        return Ok(0);
+        // A handler is installed in the live context, with -EINTR saved.
+        return Ok(uctx.retval() as isize);
     };
 
     if let Some(info) = info.nullable() {
@@ -292,8 +303,9 @@ pub fn sys_rt_sigsuspend(
         Poll::Pending
     }));
 
-    // sigsuspend always returns -EINTR
-    Err(AxError::Interrupted)
+    // The saved caller context already contains -EINTR. The live register
+    // now holds the handler's argument on RISC-V and LoongArch.
+    Ok(uctx.retval() as isize)
 }
 
 pub fn sys_sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> AxResult<isize> {

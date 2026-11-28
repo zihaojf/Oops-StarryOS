@@ -35,8 +35,7 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                                 "{:?}: segmentation fault at {:#x} {:?}",
                                 thr.proc_data.proc, addr, flags
                             );
-                            raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV))
-                                .expect("Failed to send SIGSEGV");
+                            raise_signal_fatal(thr, SignalInfo::new_kernel(Signo::SIGSEGV));
                         }
                     }
                     ReturnReason::Interrupt => {}
@@ -55,13 +54,11 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                             ExceptionKind::IllegalInstruction => Signo::SIGILL,
                             _ => Signo::SIGTRAP,
                         };
-                        raise_signal_fatal(SignalInfo::new_kernel(signo))
-                            .expect("Failed to send SIGTRAP");
+                        raise_signal_fatal(thr, SignalInfo::new_kernel(signo));
                     }
                     r => {
                         warn!("Unexpected return reason: {r:?}");
-                        raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGSEGV))
-                            .expect("Failed to send SIGSEGV");
+                        raise_signal_fatal(thr, SignalInfo::new_kernel(Signo::SIGSEGV));
                     }
                 }
 

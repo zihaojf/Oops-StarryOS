@@ -90,3 +90,8 @@ all-features = true
 # 平台提交副本偶尔会漏掉 vendor 下的某些 crate；这里给 axfs-ng-vfs 一份自带副本兜底，
 # 保证 directory source 里缺这个包时仍能编译。
 axfs-ng-vfs = { path = "third_party/axfs-ng-vfs" }
+
+# Cross-crate optimization matters on the syscall and filesystem hot paths.
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -260,6 +260,7 @@ impl<Hal: SystemHal> InodeRef<Hal> {
                 self.write_bytes(off, target)?;
             }
             ext4_inode_set_size(self.inner.inode, target.len() as u64);
+            self.mark_dirty();
         }
 
         Ok(())

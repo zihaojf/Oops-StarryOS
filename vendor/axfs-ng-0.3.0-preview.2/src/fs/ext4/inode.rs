@@ -22,7 +22,11 @@ pub struct Inode {
 
 impl Inode {
     pub(crate) fn new(fs: Arc<Ext4Filesystem>, ino: u32, this: Option<WeakDirEntry>) -> Arc<Self> {
-        Arc::new(Self { fs, ino, this })
+        Arc::new(Self {
+            fs,
+            ino,
+            this,
+        })
     }
 
     fn create_entry(&self, entry: &lwext4_rust::DirEntry, name: impl Into<String>) -> DirEntry {
@@ -65,12 +69,13 @@ impl NodeOps for Inode {
     }
 
     fn metadata(&self) -> VfsResult<Metadata> {
+        let mut fs = self.fs.lock();
+        if let Some(metadata) = self.fs.cached_metadata(self.ino) {
+            return Ok(metadata);
+        }
         let mut attr = FileAttr::default();
-        self.fs
-            .lock()
-            .get_attr(self.ino, &mut attr)
-            .map_err(into_vfs_err)?;
-        Ok(Metadata {
+        fs.get_attr(self.ino, &mut attr).map_err(into_vfs_err)?;
+        let metadata = Metadata {
             inode: self.ino as _,
             device: attr.device,
             nlink: attr.nlink,
@@ -85,11 +90,13 @@ impl NodeOps for Inode {
             atime: attr.atime,
             mtime: attr.mtime,
             ctime: attr.ctime,
-        })
+        };
+        self.fs.cache_metadata(self.ino, &metadata);
+        Ok(metadata)
     }
 
     fn update_metadata(&self, update: MetadataUpdate) -> VfsResult<()> {
-        let mut fs = self.fs.lock();
+        let mut fs = self.fs.lock_for_update();
         fs.with_inode_ref(self.ino, |inode| {
             if let Some(mode) = update.mode {
                 inode.set_mode((inode.mode() & !0xfff) | (mode.bits() as u32));
@@ -111,10 +118,7 @@ impl NodeOps for Inode {
     }
 
     fn len(&self) -> VfsResult<u64> {
-        self.fs
-            .lock()
-            .with_inode_ref(self.ino, |inode| Ok(inode.size()))
-            .map_err(into_vfs_err)
+        Ok(self.metadata()?.size)
     }
 
     fn filesystem(&self) -> &dyn FilesystemOps {
@@ -144,13 +148,13 @@ impl FileNodeOps for Inode {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
         self.fs
-            .lock()
+            .lock_for_update()
             .write_at(self.ino, buf, offset)
             .map_err(into_vfs_err)
     }
 
     fn append(&self, buf: &[u8]) -> VfsResult<(usize, u64)> {
-        let mut fs = self.fs.lock();
+        let mut fs = self.fs.lock_for_update();
         let length = fs
             .with_inode_ref(self.ino, |inode| Ok(inode.size()))
             .map_err(into_vfs_err)?;
@@ -159,12 +163,15 @@ impl FileNodeOps for Inode {
     }
 
     fn set_len(&self, len: u64) -> VfsResult<()> {
-        self.fs.lock().set_len(self.ino, len).map_err(into_vfs_err)
+        self.fs
+            .lock_for_update()
+            .set_len(self.ino, len)
+            .map_err(into_vfs_err)
     }
 
     fn set_symlink(&self, target: &str) -> VfsResult<()> {
         self.fs
-            .lock()
+            .lock_for_update()
             .set_symlink(self.ino, target.as_bytes())
             .map_err(into_vfs_err)
     }
@@ -221,7 +228,7 @@ impl DirNodeOps for Inode {
                 return Err(VfsError::InvalidData);
             }
         };
-        let mut fs = self.fs.lock();
+        let mut fs = self.fs.lock_for_update();
         if fs.lookup(self.ino, name).is_ok() {
             return Err(VfsError::AlreadyExists);
         }
@@ -249,7 +256,7 @@ impl DirNodeOps for Inode {
     }
 
     fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry> {
-        let mut fs = self.fs.lock();
+        let mut fs = self.fs.lock_for_update();
         fs.link(self.ino, name, node.inode() as _)
             .map_err(into_vfs_err)?;
         self.update_ctime_locked(&mut fs, node.inode() as _)?;
@@ -257,12 +264,15 @@ impl DirNodeOps for Inode {
     }
 
     fn unlink(&self, name: &str) -> VfsResult<()> {
-        self.fs.lock().unlink(self.ino, name).map_err(into_vfs_err)
+        self.fs
+            .lock_for_update()
+            .unlink(self.ino, name)
+            .map_err(into_vfs_err)
     }
 
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
         let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
-        let mut fs = self.fs.lock();
+        let mut fs = self.fs.lock_for_update();
         fs.rename(self.ino, src_name, dst_dir.ino, dst_name)
             .map_err(into_vfs_err)
     }

@@ -5,13 +5,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::{
-    future::poll_fn,
-    ops::Deref,
-    sync::atomic::AtomicBool,
-    task::{Poll, Waker},
-    time::Duration,
-};
+use core::{ops::Deref, sync::atomic::AtomicBool, time::Duration};
 
 use axerrno::AxResult;
 use axsync::Mutex;
@@ -19,6 +13,7 @@ use axtask::{
     current,
     future::{self, block_on, interruptible},
 };
+use event_listener::Event;
 use hashbrown::HashMap;
 use kspin::SpinNoIrq;
 use memory_addr::VirtAddr;
@@ -31,7 +26,7 @@ use crate::{
 /// Wait queue used by futex.
 #[derive(Default)]
 pub struct WaitQueue {
-    queue: SpinNoIrq<VecDeque<(Waker, u32)>>,
+    queue: SpinNoIrq<VecDeque<(Weak<Event>, u32)>>,
 }
 impl WaitQueue {
     /// Creates a new `WaitQueue`.
@@ -49,35 +44,34 @@ impl WaitQueue {
         timeout: Option<Duration>,
         condition: impl FnOnce() -> bool,
     ) -> AxResult<bool> {
-        let mut condition = Some(condition);
-        block_on(interruptible(future::timeout(
-            timeout,
-            poll_fn(|cx| {
-                if let Some(cond) = condition.take() {
-                    let mut queue = self.queue.lock();
-                    if !cond() {
-                        Poll::Ready(Ok(false))
-                    } else {
-                        queue.push_back((cx.waker().clone(), bitset));
-                        Poll::Pending
-                    }
-                } else {
-                    Poll::Ready(Ok(true))
-                }
-            }),
-        )))??
+        let event = Arc::new(Event::new());
+        let listener = {
+            let mut queue = self.queue.lock();
+            if !condition() {
+                return Ok(false);
+            }
+            // Register before releasing the lock so an early wake is retained.
+            let listener = event.listen();
+            queue.retain(|(entry, _)| entry.strong_count() != 0);
+            queue.push_back((Arc::downgrade(&event), bitset));
+            listener
+        };
+        block_on(interruptible(future::timeout(timeout, listener)))??;
+        Ok(true)
     }
 
     /// Wakes up at most `count` tasks whose bitset intersects with the given
     /// bitmask.
     pub fn wake(&self, count: usize, mask: u32) -> usize {
         let mut woke = 0;
-        self.queue.lock().retain(|(waker, bitset)| {
+        self.queue.lock().retain(|(entry, bitset)| {
+            let Some(event) = entry.upgrade() else {
+                return false;
+            };
             if woke >= count || (bitset & mask) == 0 {
                 true
             } else {
-                waker.wake_by_ref();
-                woke += 1;
+                woke += event.notify(1);
                 false
             }
         });
@@ -86,13 +80,17 @@ impl WaitQueue {
 
     /// Checks if the wait queue is empty.
     pub fn is_empty(&self) -> bool {
-        self.queue.lock().is_empty()
+        self.queue
+            .lock()
+            .iter()
+            .all(|(entry, _)| entry.strong_count() == 0)
     }
 
     /// Requeue at most `count` tasks to the target wait queue.
     pub fn requeue(&self, mut count: usize, target: &WaitQueue) -> usize {
         let tasks: Vec<_> = {
             let mut wq = self.queue.lock();
+            wq.retain(|(entry, _)| entry.strong_count() != 0);
             count = count.min(wq.len());
             wq.drain(..count).collect()
         };

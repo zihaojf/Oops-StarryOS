@@ -211,7 +211,8 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         if let Some(futex) = guard {
             futex.wq.wake(1, u32::MAX);
         }
-        axtask::yield_now();
+        // Finish publishing exit before scheduling a woken joiner. There is
+        // no reason to yield when no thread is waiting on clear_child_tid.
     }
     let head = thr.robust_list_head() as *const RobustListHead;
     if !head.is_null()

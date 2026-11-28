@@ -47,7 +47,8 @@ pub fn block_next_signal() {
 }
 
 pub fn unblock_next_signal() -> bool {
-    BLOCK_NEXT_SIGNAL_CHECK.swap(false, Ordering::SeqCst)
+    BLOCK_NEXT_SIGNAL_CHECK.load(Ordering::Relaxed)
+        && BLOCK_NEXT_SIGNAL_CHECK.swap(false, Ordering::SeqCst)
 }
 
 pub fn with_blocked_signals<R>(
@@ -118,21 +119,12 @@ pub fn send_signal_to_process_group(pgid: Pid, sig: Option<SignalInfo>) -> AxRes
     Ok(())
 }
 
-/// Sends a fatal signal to the current process.
-pub fn raise_signal_fatal(sig: SignalInfo) -> AxResult<()> {
-    let curr = current();
-    let proc_data = &curr.as_thread().proc_data;
-
+/// Queue a synchronous hardware exception on the thread that took the trap.
+/// The return-to-user path checks its pending queue before resuming it.
+pub fn raise_signal_fatal(thr: &Thread, sig: SignalInfo) {
     let signo = sig.signo();
-    info!("Send fatal signal {signo:?} to the current process");
-    if let Some(tid) = proc_data.signal.send_signal(sig)
-        && let Ok(task) = get_task(tid)
-    {
-        task.interrupt();
-    } else {
-        // No task wants to handle the signal, abort the task
-        do_exit(signo as i32, true);
+    if !thr.signal.send_signal(sig) {
+        // A blocked or ignored synchronous fault cannot resume the instruction.
+        do_exit(128 + signo as i32, true);
     }
-
-    Ok(())
 }

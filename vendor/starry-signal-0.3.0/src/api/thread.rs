@@ -216,6 +216,18 @@ impl ThreadSignalManager {
         !self.signal_blocked(signo)
     }
 
+    /// Send a process-directed signal from a thread returning to user mode.
+    /// The signal stays on the shared queue. If this thread can take it,
+    /// it checks that queue on syscall return without a separate wakeup.
+    pub fn send_to_own_process(&self, sig: SignalInfo) -> Option<u32> {
+        if self.signal_blocked(sig.signo()) {
+            self.proc.send_signal(sig)
+        } else {
+            self.proc.enqueue_signal(sig);
+            None
+        }
+    }
+
     /// Gets the blocked signals.
     pub fn blocked(&self) -> SignalSet {
         *self.blocked.lock()

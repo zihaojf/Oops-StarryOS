@@ -245,6 +245,12 @@ impl<Hal: SystemHal, Dev: BlockDevice> Ext4Filesystem<Hal, Dev> {
     pub fn flush(&mut self) -> Ext4Result<()> {
         unsafe {
             ext4_block_cache_flush(self.bdev.inner.as_mut()).context("ext4_cache_flush")?;
+            // Block group descriptors have already reached the device. Persist
+            // the matching allocation counters from the in-memory superblock.
+            let fs = self.inner.as_mut();
+            if !fs.read_only {
+                ext4_sb_write(fs.bdev, &mut fs.sb).context("ext4_sb_write")?;
+            }
         }
         Ok(())
     }

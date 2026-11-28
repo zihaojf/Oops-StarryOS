@@ -9,7 +9,7 @@ use linux_raw_sys::general::{
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
-    file::{File, FileLike, resolve_at},
+    file::{File, FileLike, get_file_like, resolve_at},
     mm::vm_load_string,
 };
 
@@ -27,7 +27,10 @@ pub fn sys_stat(path: *const c_char, statbuf: *mut stat) -> AxResult<isize> {
 ///
 /// Return 0 if success.
 pub fn sys_fstat(fd: i32, statbuf: *mut stat) -> AxResult<isize> {
-    sys_fstatat(fd, core::ptr::null(), statbuf, AT_EMPTY_PATH)
+    // Metadata is available for every descriptor, including O_PATH handles.
+    // Avoid converting it back into a pathname/backend and cloning it twice.
+    statbuf.vm_write(get_file_like(fd)?.stat()?.into())?;
+    Ok(0)
 }
 
 /// Get the metadata of the symbolic link and write into `buf`.
@@ -50,8 +53,11 @@ pub fn sys_fstatat(
 
     debug!("sys_fstatat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
-    let loc = resolve_at(dirfd, path.as_deref(), flags)?;
-    statbuf.vm_write(loc.stat()?.into())?;
+    if flags & AT_EMPTY_PATH != 0 && path.as_deref().is_none_or(str::is_empty) {
+        statbuf.vm_write(get_file_like(dirfd)?.stat()?.into())?;
+    } else {
+        statbuf.vm_write(resolve_at(dirfd, path.as_deref(), flags)?.stat()?.into())?;
+    }
 
     Ok(0)
 }
@@ -93,7 +99,12 @@ pub fn sys_statx(
     let path = path.nullable().map(vm_load_string).transpose()?;
     debug!("sys_statx <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
-    statxbuf.vm_write(resolve_at(dirfd, path.as_deref(), flags)?.stat()?.into())?;
+    let metadata = if flags & AT_EMPTY_PATH != 0 && path.as_deref().is_none_or(str::is_empty) {
+        get_file_like(dirfd)?.stat()?
+    } else {
+        resolve_at(dirfd, path.as_deref(), flags)?.stat()?
+    };
+    statxbuf.vm_write(metadata.into())?;
 
     Ok(0)
 }
