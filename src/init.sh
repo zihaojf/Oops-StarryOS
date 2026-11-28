@@ -133,18 +133,21 @@ GROUP
     fi
 
     # The musl test binaries are dynamically linked against
-    # `/lib/ld-musl-riscv64-sf.so.1` (riscv64) or
-    # `/lib64/ld-musl-loongarch-lp64d.so.1` (loongarch64).  For musl, libc.so
-    # itself is the dynamic loader, so install a copy under the expected name.
+    # `/lib/ld-musl-riscv64-sf.so.1` (entry-dynamic), `/lib/ld-musl-riscv64.so.1`
+    # (riscv64 LTP binaries), or `/lib64/ld-musl-loongarch-lp64d.so.1`
+    # (loongarch64).  For musl, libc.so itself is the dynamic loader, so install
+    # copies under each expected interpreter path.
     if [ -f /musl/lib/libc.so ]; then
         case "$ARCH" in
-            loongarch64) interp=/lib64/ld-musl-loongarch-lp64d.so.1 ;;
-            *)           interp=/lib/ld-musl-riscv64-sf.so.1 ;;
+            loongarch64) interps="/lib64/ld-musl-loongarch-lp64d.so.1" ;;
+            *)           interps="/lib/ld-musl-riscv64-sf.so.1 /lib/ld-musl-riscv64.so.1" ;;
         esac
-        if [ ! -x "$interp" ]; then
-            $BB cp /musl/lib/libc.so "$interp" 2>/dev/null || $BB cat /musl/lib/libc.so > "$interp"
-            $BB chmod 755 "$interp"
-        fi
+        for interp in $interps; do
+            if [ ! -x "$interp" ]; then
+                $BB cp /musl/lib/libc.so "$interp" 2>/dev/null || $BB cat /musl/lib/libc.so > "$interp"
+                $BB chmod 755 "$interp"
+            fi
+        done
     fi
 }
 
@@ -813,24 +816,27 @@ fi
 run_pass 240 basic_testcode.sh busybox_testcode.sh lua_testcode.sh libcbench_testcode.sh
 
 # LTP：只跑白名单里的用例。单例 60 s，紧跟快套件之后执行——实测放在 libctest
-# 之后跑会卡在 abort01 的 core-dump 路径上。musl 侧 LTP 目前启动即 segfault，
-# 暂时只跑 glibc。
+# 之后跑会卡在 abort01 的 core-dump 路径上。同时开启 riscv64 / loongarch64 与
+# glibc / musl 共 4 个 LTP 测试点。
 run_ltp() {
     dir="$1"
+    variant="${dir##*/}"
     [ -r "$LTP_ALLOW" ] || return
+    ltp_wanted "$dir" || return
     cd "$dir" 2>/dev/null || return
-    export LD_LIBRARY_PATH=/glibc/lib
+    export LD_LIBRARY_PATH="$dir/lib"
     export PATH="$dir/ltp/testcases/bin:$dir/ltp/bin:$dir:$PATH"
     echo "#### StarryOS: running $dir/ltp (allowlist) ####"
-    echo "#### OS COMP TEST GROUP START ltp-glibc ####"
-    # 白名单是在 RV 上筛出来的；少数用例在 LA 上会卡死内核，按架构排除。
-    LTP_SKIP_LA="dirtyc0w dirtypipe"
+    echo "#### OS COMP TEST GROUP START ltp-$variant ####"
+    # sigwaitinfo01 / sigtimedwait01 在 musl 路径上会卡死在内核态等待（glibc 正常通过）。
+    LTP_SKIP_MUSL="sigwaitinfo01 sigtimedwait01"
     while read -r _case; do
         [ -n "$_case" ] || continue
         [ -e "ltp/testcases/bin/$_case" ] || continue
-        if [ "$ARCH" = "loongarch64" ]; then
-            case " $LTP_SKIP_LA " in
-                *" $_case "*) echo "SKIP LTP CASE $_case (la)" ; continue ;;
+        case_wanted "$_case" || continue
+        if [ "$variant" = "musl" ]; then
+            case " $LTP_SKIP_MUSL " in
+                *" $_case "*) echo "SKIP LTP CASE $_case (musl)" ; continue ;;
             esac
         fi
         # fs_bind* 每个都要跑满 60 s 超时才结束，性价比太低，统一跳过。
@@ -841,17 +847,15 @@ run_ltp() {
         $BB timeout -s KILL 60 "./ltp/testcases/bin/$_case"
         echo "FAIL LTP CASE $_case : $?"
     done < "$LTP_ALLOW"
-    echo "#### OS COMP TEST GROUP END ltp-glibc ####"
+    echo "#### OS COMP TEST GROUP END ltp-$variant ####"
     echo "#### StarryOS: finished $dir/ltp (allowlist) ####"
 }
 
-if [ "$ARCH" != "loongarch64" ]; then
-    for d in $TESTDIRS; do
-        case "$d" in
-            /glibc) run_ltp "$d" ;;
-        esac
-    done
-fi
+for d in $TESTDIRS; do
+    case "$d" in
+        /glibc|/musl) run_ltp "$d" ;;
+    esac
+done
 
 run_pass 240 iperf_testcode.sh netperf_testcode.sh
 run_pass 600 libctest_testcode.sh
