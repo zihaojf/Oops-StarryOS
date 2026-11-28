@@ -2,7 +2,8 @@
 
 use core::arch::asm;
 
-use memory_addr::VirtAddr;
+use crate::local_asid;
+use memory_addr::{PhysAddr, VirtAddr};
 use page_table_entry::loongarch64::LA64PTE;
 
 use crate::{PageTable64, PageTable64Cursor, PagingMetaData};
@@ -50,10 +51,32 @@ impl PagingMetaData for LA64MetaData {
 
     type VirtAddr = VirtAddr;
 
+    fn root_allocated(root: PhysAddr) {
+        local_asid::root_allocated(root);
+    }
+
+    fn flush_root(root: PhysAddr, vaddr: Option<VirtAddr>) {
+        if !local_asid::enabled() {
+            return Self::flush_tlb(vaddr);
+        }
+        // Rootless/kernel changes and shared kernel mappings need a full flush.
+        // A low user VA must instead invalidate the tag of its *own* table,
+        // including when COW or unmap modifies an inactive address space.
+        match vaddr {
+            Some(va) if va.as_usize() < (1usize << 47) && root.as_usize() != 0 => {
+                let tag = local_asid::tag(root);
+                unsafe {
+                    asm!("dbar 0; invtlb 0x06, {tag}, {va}", tag=in(reg) tag, va=in(reg) va.as_usize());
+                }
+            }
+            _ => Self::flush_tlb(None),
+        }
+    }
+
     #[inline]
     fn flush_tlb(vaddr: Option<VirtAddr>) {
         unsafe {
-            if let Some(vaddr) = vaddr {
+            if let Some(vaddr) = vaddr.filter(|_| !local_asid::enabled()) {
                 // <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#_dbar>
                 //
                 // Only after all previous load/store access operations are completely

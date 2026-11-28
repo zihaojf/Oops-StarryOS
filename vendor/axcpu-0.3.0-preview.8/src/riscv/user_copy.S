@@ -36,7 +36,7 @@ user_copy:
      * XLENB holds 4 for RV32 and 8 for RV64
      */
     li      a3, 9*XLENB-1 /* size must >= (word_copy REG_Side + XLENB-1) */
-    bltu    a2, a3, .Lbyte_copy_tail
+    bltu    a2, a3, .Lsmall_copy
 
     /*
      * Copy first bytes until dst is aligned to word boundary.
@@ -97,7 +97,26 @@ user_copy:
     bleu    a0, t0, 2b
 
     addi    t0, t0, 8*XLENB /* revert to original value */
-    j   .Lbyte_copy_tail
+    j       .Laligned_tail
+
+.Lsmall_copy:
+    or      t1, a0, a1
+    andi    t1, t1, XLENB-1
+    bnez    t1, .Lbyte_copy_tail
+.Laligned_tail:
+    // Each word lies wholly within the requested interval. Keep a0 at the
+    // first uncopied byte until both the load and the store have succeeded.
+    sub     t1, t0, a0
+    li      t2, XLENB
+    bltu    t1, t2, .Lbyte_copy_tail
+    addi    t1, t0, -XLENB
+.Lcopy_one_word:
+    fixup   LDR a4, a1, 0
+    fixup   STR a4, a0, 0
+    addi    a0, a0, XLENB
+    addi    a1, a1, XLENB
+    bleu    a0, t1, .Lcopy_one_word
+    j       .Lbyte_copy_tail
 
 .Lshift_copy:
 

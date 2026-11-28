@@ -19,6 +19,7 @@ pub struct PidFd {
     proc_data: Weak<ProcessData>,
     exit_event: Arc<PollSet>,
     thread_exit: Option<Arc<AtomicBool>>,
+    target_tid: u32,
 
     non_blocking: AtomicBool,
 }
@@ -28,19 +29,25 @@ impl PidFd {
             proc_data: Arc::downgrade(proc_data),
             exit_event: proc_data.exit_event.clone(),
             thread_exit: None,
+            target_tid: proc_data.proc.pid(),
 
             non_blocking: AtomicBool::new(false),
         }
     }
 
-    pub fn new_thread(thread: &Thread) -> Self {
+    pub fn new_thread(thread: &Thread, tid: u32) -> Self {
         Self {
             proc_data: Arc::downgrade(&thread.proc_data),
             exit_event: thread.exit_event.clone(),
             thread_exit: Some(thread.exit.clone()),
+            target_tid: tid,
 
             non_blocking: AtomicBool::new(false),
         }
+    }
+
+    pub fn target_tid(&self) -> u32 {
+        self.target_tid
     }
 
     pub fn process_data(&self) -> AxResult<Arc<ProcessData>> {

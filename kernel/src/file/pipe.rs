@@ -8,10 +8,7 @@ use core::{
 use axerrno::{AxError, AxResult};
 use axpoll::{IoEvents, PollSet, Pollable};
 use axsync::Mutex;
-use axtask::{
-    current,
-    future::{block_on, poll_io},
-};
+use axtask::{current, future::blocking_io};
 use linux_raw_sys::{general::S_IFIFO, ioctl::FIONREAD};
 use memory_addr::PAGE_SIZE_4K;
 use ringbuf::{
@@ -34,6 +31,7 @@ struct Shared {
     poll_rx: PollSet,
     poll_tx: PollSet,
     poll_close: PollSet,
+    endpoint_closed: AtomicBool,
 }
 
 pub struct Pipe {
@@ -43,6 +41,11 @@ pub struct Pipe {
 }
 impl Drop for Pipe {
     fn drop(&mut self) {
+        // Publish EOF/EPIPE before a woken peer can poll again. The Shared
+        // reference count still includes this endpoint during its destructor.
+        self.shared.endpoint_closed.store(true, Ordering::Release);
+        self.shared.poll_rx.wake();
+        self.shared.poll_tx.wake();
         self.shared.poll_close.wake();
     }
 }
@@ -54,6 +57,7 @@ impl Pipe {
             poll_rx: PollSet::new(),
             poll_tx: PollSet::new(),
             poll_close: PollSet::new(),
+            endpoint_closed: AtomicBool::new(false),
         });
         let read_end = Pipe {
             read_side: true,
@@ -77,7 +81,7 @@ impl Pipe {
     }
 
     pub fn closed(&self) -> bool {
-        Arc::strong_count(&self.shared) == 1
+        self.shared.endpoint_closed.load(Ordering::Acquire)
     }
 
     pub fn capacity(&self) -> usize {
@@ -120,26 +124,27 @@ impl FileLike for Pipe {
             return Ok(0);
         }
 
-        block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
-            let read = {
-                let cons = self.shared.buffer.lock();
-                let (left, right) = cons.as_slices();
-                let mut count = dst.write(left)?;
-                if count >= left.len() {
-                    count += dst.write(right)?;
-                }
-                unsafe { cons.advance_read_index(count) };
-                count
-            };
-            if read > 0 {
-                self.shared.poll_tx.wake();
-                Ok(read)
-            } else if self.closed() {
-                Ok(0)
-            } else {
-                Err(AxError::WouldBlock)
+        blocking_io(self, IoEvents::IN, self.nonblocking(), || {
+            let cons = self.shared.buffer.lock();
+            let (left, right) = cons.as_slices();
+            if left.is_empty() && right.is_empty() {
+                return if self.closed() {
+                    Ok(0)
+                } else {
+                    Err(AxError::WouldBlock)
+                };
             }
-        }))
+            let mut count = dst.write(left)?;
+            if count == left.len() && !right.is_empty() && !dst.is_full() {
+                count += dst.write(right)?;
+            }
+            unsafe { cons.advance_read_index(count) };
+            drop(cons);
+            if count != 0 {
+                self.shared.poll_tx.wake();
+            }
+            Ok(count)
+        })
     }
 
     fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
@@ -153,7 +158,7 @@ impl FileLike for Pipe {
 
         let mut total_written = 0;
 
-        block_on(poll_io(self, IoEvents::OUT, self.nonblocking(), || {
+        blocking_io(self, IoEvents::OUT, self.nonblocking(), || {
             if self.closed() {
                 raise_pipe();
                 return Err(AxError::BrokenPipe);
@@ -161,6 +166,9 @@ impl FileLike for Pipe {
 
             let written = {
                 let mut prod = self.shared.buffer.lock();
+                if prod.vacant_len() == 0 {
+                    return Err(AxError::WouldBlock);
+                }
                 let (left, right) = prod.vacant_slices_mut();
                 // `MaybeUninit::slice_assume_init_mut` is not available on the
                 // toolchain used by the evaluation image; the ring buffer
@@ -172,7 +180,7 @@ impl FileLike for Pipe {
                     core::slice::from_raw_parts_mut(right.as_mut_ptr().cast::<u8>(), right.len())
                 };
                 let mut count = src.read(left)?;
-                if count >= left.len() {
+                if count == left.len() && !right.is_empty() && src.remaining() != 0 {
                     count += src.read(right)?;
                 }
                 unsafe { prod.advance_write_index(count) };
@@ -186,7 +194,7 @@ impl FileLike for Pipe {
                 }
             }
             Err(AxError::WouldBlock)
-        }))
+        })
     }
 
     fn stat(&self) -> AxResult<Kstat> {
@@ -242,6 +250,9 @@ impl Pollable for Pipe {
         if events.contains(IoEvents::OUT) {
             self.shared.poll_tx.register(context.waker());
         }
-        self.shared.poll_close.register(context.waker());
+        // Endpoint closure wakes both data queues as well.
+        if !events.intersects(IoEvents::IN | IoEvents::OUT) {
+            self.shared.poll_close.register(context.waker());
+        }
     }
 }

@@ -10,7 +10,7 @@ use axtask::{AxTaskExt, spawn_task};
 use starry_process::{Pid, Process};
 
 use crate::{
-    file::FD_TABLE,
+    file::SharedFileTable,
     mm::{copy_from_kernel, load_user_app, new_user_aspace_empty},
     pseudofs::{self, dev::tty::N_TTY},
     task::{ProcessData, Thread, add_task_to_table, new_user_task, spawn_alarm_task},
@@ -18,6 +18,11 @@ use crate::{
 
 /// Initialize and run initproc.
 pub fn init(args: &[String], envs: &[String]) {
+    #[cfg(any(target_arch = "loongarch64", target_arch = "riscv64"))]
+    if axconfig::plat::MAX_CPU_NUM == 1 {
+        // This platform cannot start a second CPU while the local tags are in use.
+        unsafe { axhal::asm::enable_local_asids() };
+    }
     pseudofs::mount_all().expect("Failed to mount pseudofs");
     spawn_alarm_task();
 
@@ -59,13 +64,9 @@ pub fn init(args: &[String], envs: &[String]) {
         None,
     );
 
-    {
-        let mut scope = proc.scope.write();
-        crate::file::add_stdio(&mut FD_TABLE.scope_mut(&mut scope).write())
-            .expect("Failed to add stdio");
-    }
-
-    let thr = Thread::new(pid, proc);
+    let files = SharedFileTable::default();
+    crate::file::add_stdio(&mut files.write()).expect("Failed to add stdio");
+    let thr = Thread::new(pid, proc, files);
     *task.task_ext_mut() = Some(AxTaskExt::from_impl(thr));
 
     let task = spawn_task(task);

@@ -3,7 +3,7 @@ use bitflags::bitflags;
 use starry_signal::SignalInfo;
 
 use crate::{
-    file::{FD_TABLE, FileLike, PidFd, add_file_like},
+    file::{FileLike, PidFd, add_file_like},
     syscall::signal::make_queue_signal_info,
     task::{AsThread, get_process_data, get_task, send_signal_to_process},
 };
@@ -22,7 +22,7 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> AxResult<isize> {
     let flags = PidFdFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
 
     let fd = if flags.contains(PidFdFlags::THREAD) {
-        PidFd::new_thread(get_task(pid)?.as_thread())
+        PidFd::new_thread(get_task(pid)?.as_thread(), pid)
     } else {
         PidFd::new_process(&get_process_data(pid)?)
     };
@@ -37,16 +37,18 @@ pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> AxResult<isize
     debug!("sys_pidfd_getfd <= pidfd: {pidfd}, target_fd: {target_fd}, flags: {flags}");
 
     let pidfd = PidFd::from_fd(pidfd)?;
-    let proc_data = pidfd.process_data()?;
-    FD_TABLE
-        .scope(&proc_data.scope.read())
+    pidfd.process_data()?;
+    let task = get_task(pidfd.target_tid())?;
+    let file = task
+        .as_thread()
+        .file_table
+        .read()
         .read()
         .get(target_fd as usize)
-        .ok_or(AxError::BadFileDescriptor)
-        .and_then(|fd| {
-            let fd = add_file_like(fd.inner.clone(), true)?;
-            Ok(fd as isize)
-        })
+        .ok_or(AxError::BadFileDescriptor)?
+        .inner
+        .clone();
+    add_file_like(file, true).map(|fd| fd as isize)
 }
 
 pub fn sys_pidfd_send_signal(

@@ -38,6 +38,24 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> AxResult<T>, T>(
     .await?
 }
 
+/// Run an interruptible I/O operation, registering a real waker only if it blocks.
+pub fn blocking_io<P: Pollable, F: FnMut() -> AxResult<T>, T>(
+    pollable: &P,
+    events: IoEvents,
+    non_blocking: bool,
+    mut f: F,
+) -> AxResult<T> {
+    if crate::current().take_interrupt() {
+        return Err(AxError::Interrupted);
+    }
+    match f() {
+        Err(AxError::WouldBlock) if !non_blocking => {
+            super::block_on(poll_io(pollable, events, false, f))
+        }
+        result => result,
+    }
+}
+
 #[cfg(feature = "irq")]
 /// Registers a waker for the given IRQ number.
 pub fn register_irq_waker(irq: usize, waker: &core::task::Waker) {

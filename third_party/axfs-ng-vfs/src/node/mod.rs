@@ -54,6 +54,9 @@ bitflags! {
         /// This could prevent higher layers from attempting to add unnecessary
         /// non-blocking handling.
         const BLOCKING = 0x0008;
+
+        /// poll() always returns exactly IN | OUT for the lifetime of this node.
+        const POLL_ALWAYS_READY = 0x0010;
     }
 }
 

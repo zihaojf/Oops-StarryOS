@@ -2,44 +2,76 @@ use alloc::vec::Vec;
 use core::{fmt, time::Duration};
 
 use axerrno::{AxError, AxResult};
+use axio::Read;
 use axpoll::IoEvents;
 use axtask::future::{self, block_on, poll_io};
 use bitmaps::Bitmap;
-use linux_raw_sys::{
-    general::*,
-    select_macros::{FD_ISSET, FD_SET, FD_ZERO},
-};
+use linux_raw_sys::general::*;
 use starry_signal::SignalSet;
+use starry_vm::{VmPtr, vm_write_slice};
 
 use super::FdPollSet;
 use crate::{
-    file::FD_TABLE,
-    mm::{UserConstPtr, UserPtr, nullable},
+    file::current_files,
+    mm::{UserConstPtr, UserPtr, VmBytes, nullable},
     syscall::signal::check_sigset_size,
     task::with_blocked_signals,
     time::TimeValueLike,
 };
 
-struct FdSet(Bitmap<{ __FD_SETSIZE as usize }>);
+type Bits = Bitmap<{ __FD_SETSIZE as usize }>;
+
+struct FdSet {
+    ptr: UserPtr<__kernel_fd_set>,
+    bytes: usize,
+    bits: Bits,
+}
 
 impl FdSet {
-    fn new(nfds: usize, fds: Option<&__kernel_fd_set>) -> Self {
-        let mut bitmap = Bitmap::new();
-        if let Some(fds) = fds {
-            for i in 0..nfds {
-                if unsafe { FD_ISSET(i as _, fds) } {
-                    bitmap.set(i, true);
-                }
-            }
+    fn load(ptr: UserPtr<__kernel_fd_set>, nfds: usize) -> AxResult<Self> {
+        let bytes = nfds.div_ceil(usize::BITS as usize) * size_of::<usize>();
+        let mut bits = Bits::new();
+        if bytes != 0 && !ptr.is_null() {
+            VmBytes::new(ptr.address().as_ptr(), bytes).read(&mut bits.as_mut()[..bytes])?;
+            bits &= Bits::mask(nfds);
         }
-        Self(bitmap)
+        Ok(Self { ptr, bytes, bits })
+    }
+
+    fn store(&self, bits: Bits) -> AxResult<()> {
+        if self.bytes != 0 && !self.ptr.is_null() {
+            vm_write_slice(
+                self.ptr.address().as_mut_ptr(),
+                &bits.as_bytes()[..self.bytes],
+            )?;
+        }
+        Ok(())
     }
 }
 
 impl fmt::Debug for FdSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(&self.0).finish()
+        f.debug_list().entries(&self.bits).finish()
     }
+}
+
+fn fixed_ready_count(
+    read: &FdSet,
+    write: &FdSet,
+    except: &FdSet,
+    fixed: &Bits,
+    nfds: u32,
+) -> Option<u32> {
+    let mut count = 0;
+    for i in 0..nfds.div_ceil(u128::BITS) as usize {
+        let r = read.bits.as_value()[i];
+        let w = write.bits.as_value()[i];
+        if (r | w | except.bits.as_value()[i]) & !fixed.as_value()[i] != 0 {
+            return None;
+        }
+        count += r.count_ones() + w.count_ones();
+    }
+    (count > 0).then_some(count)
 }
 
 fn do_select(
@@ -56,102 +88,86 @@ fn do_select(
     let sigmask = if let Some(sigmask) = nullable!(sigmask.get_as_ref())? {
         check_sigset_size(sigmask.sigsetsize)?;
         let set = sigmask.set;
-        nullable!(set.get_as_ref())?
+        nullable!(set.get_as_ref())?.copied()
     } else {
         None
     };
 
-    let mut readfds = nullable!(readfds.get_as_mut())?;
-    let mut writefds = nullable!(writefds.get_as_mut())?;
-    let mut exceptfds = nullable!(exceptfds.get_as_mut())?;
+    let read = FdSet::load(readfds, nfds as usize)?;
+    let write = FdSet::load(writefds, nfds as usize)?;
+    let except = FdSet::load(exceptfds, nfds as usize)?;
+    debug!("sys_select <= nfds: {nfds} read: {read:?} write: {write:?} except: {except:?}");
 
-    let read_set = FdSet::new(nfds as _, readfds.as_deref());
-    let write_set = FdSet::new(nfds as _, writefds.as_deref());
-    let except_set = FdSet::new(nfds as _, exceptfds.as_deref());
-
-    debug!(
-        "sys_select <= nfds: {nfds} sets: [read: {read_set:?}, write: {write_set:?}, except: \
-         {except_set:?}] timeout: {timeout:?}"
-    );
-
-    let fd_table = FD_TABLE.read();
-    let fd_bitmap = read_set.0 | write_set.0 | except_set.0;
-    let fd_count = fd_bitmap.len();
-    let mut fds = Vec::with_capacity(fd_count);
-    let mut fd_indices = Vec::with_capacity(fd_count);
-    for fd in fd_bitmap.into_iter() {
-        let f = fd_table
-            .get(fd)
-            .ok_or(AxError::BadFileDescriptor)?
-            .inner
-            .clone();
+    let handle = current_files();
+    let table = handle.read();
+    let fixed = table.always_ready();
+    // A descriptor marked here can never have exceptional events. Only inspect
+    // the words covered by nfds, even when the process has many high-numbered fds.
+    if let Some(count) = fixed_ready_count(&read, &write, &except, &fixed, nfds) {
+        drop(table);
+        drop(handle);
+        with_blocked_signals(sigmask, || {
+            axtask::future::blocking_io(&FdPollSet(Vec::new()), IoEvents::empty(), true, || Ok(()))
+        })?;
+        read.store(read.bits)?;
+        write.store(write.bits)?;
+        except.store(Bits::new())?;
+        return Ok(count as isize);
+    }
+    let read_ready = read.bits & fixed;
+    let write_ready = write.bits & fixed;
+    let dynamic = (read.bits | write.bits | except.bits) & !fixed;
+    let mut files = Vec::with_capacity(dynamic.len());
+    let mut indices = Vec::with_capacity(dynamic.len());
+    for index in &dynamic {
+        let file = table.get(index).ok_or(AxError::BadFileDescriptor)?;
         let mut events = IoEvents::empty();
-        events.set(IoEvents::IN, read_set.0.get(fd));
-        events.set(IoEvents::OUT, write_set.0.get(fd));
-        events.set(IoEvents::ERR, except_set.0.get(fd));
-        if !events.is_empty() {
-            fds.push((f, events));
-            fd_indices.push(fd);
-        }
+        events.set(IoEvents::IN, read.bits.get(index));
+        events.set(IoEvents::OUT, write.bits.get(index));
+        events.set(IoEvents::ERR, except.bits.get(index));
+        files.push((file.inner.clone(), events));
+        indices.push(index);
     }
+    drop(table);
+    drop(handle);
+    let files = FdPollSet(files);
 
-    drop(fd_table);
-    let fds = FdPollSet(fds);
-
-    if let Some(readfds) = readfds.as_deref_mut() {
-        unsafe { FD_ZERO(readfds) };
-    }
-    if let Some(writefds) = writefds.as_deref_mut() {
-        unsafe { FD_ZERO(writefds) };
-    }
-    if let Some(exceptfds) = exceptfds.as_deref_mut() {
-        unsafe { FD_ZERO(exceptfds) };
-    }
-    with_blocked_signals(sigmask.copied(), || {
-        match block_on(future::timeout(
+    let (r, w, e) = with_blocked_signals(sigmask, || {
+        block_on(future::timeout(
             timeout,
-            poll_io(&fds, IoEvents::empty(), false, || {
-                // `interested` 是调用方关注的集合，`raw` 是内核实际上报的事件。
-                // HUP/ERR 不能先用 `& interested` 过滤掉：Linux 的读就绪集合是
-                // IN|HUP|ERR、写就绪是 OUT|ERR，对端关闭或出错同样要立即返回，
-                // 否则 select 会一直睡到（可能不存在的）下一次就绪。
-                let mut res = 0usize;
-                for ((fd, interested), index) in fds.0.iter().zip(fd_indices.iter().copied()) {
-                    let raw = fd.poll();
-                    if interested.contains(IoEvents::IN)
+            poll_io(&files, IoEvents::empty(), false, || {
+                let (mut r, mut w, mut e) = (read_ready, write_ready, Bits::new());
+                for ((file, interest), &index) in files.0.iter().zip(&indices) {
+                    let raw = file.poll();
+                    if interest.contains(IoEvents::IN)
                         && raw.intersects(IoEvents::IN | IoEvents::HUP | IoEvents::ERR)
-                        && let Some(set) = readfds.as_deref_mut()
                     {
-                        res += 1;
-                        unsafe { FD_SET(index as _, set) };
+                        r.set(index, true);
                     }
-                    if interested.contains(IoEvents::OUT)
+                    if interest.contains(IoEvents::OUT)
                         && raw.intersects(IoEvents::OUT | IoEvents::ERR)
-                        && let Some(set) = writefds.as_deref_mut()
                     {
-                        res += 1;
-                        unsafe { FD_SET(index as _, set) };
+                        w.set(index, true);
                     }
-                    // Linux 的 exceptfds 只对应 PRI(OOB)；这里额外保留 ERR 兼容旧行为。
-                    if interested.contains(IoEvents::ERR)
-                        && raw.intersects(IoEvents::ERR | IoEvents::PRI)
-                        && let Some(set) = exceptfds.as_deref_mut()
+                    if interest.contains(IoEvents::ERR)
+                        && raw.intersects(IoEvents::PRI | IoEvents::ERR)
                     {
-                        res += 1;
-                        unsafe { FD_SET(index as _, set) };
+                        e.set(index, true);
                     }
                 }
-                if res > 0 {
-                    return Ok(res as _);
+                if r.is_empty() && w.is_empty() && e.is_empty() {
+                    Err(AxError::WouldBlock)
+                } else {
+                    Ok((r, w, e))
                 }
-
-                Err(AxError::WouldBlock)
             }),
-        )) {
-            Ok(r) => r,
-            Err(_) => Ok(0),
-        }
-    })
+        ))
+        .unwrap_or_else(|_| Ok((Bits::new(), Bits::new(), Bits::new())))
+    })?;
+    read.store(r)?;
+    write.store(w)?;
+    except.store(e)?;
+    Ok((r.len() + w.len() + e.len()) as isize)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -167,9 +183,19 @@ pub fn sys_select(
         readfds,
         writefds,
         exceptfds,
-        nullable!(timeout.get_as_ref())?
-            .map(|it| it.try_into_time_value())
-            .transpose()?,
+        if timeout.is_null() {
+            None
+        } else {
+            // The ABI structure consists solely of integer fields.
+            let time = unsafe {
+                timeout
+                    .address()
+                    .as_ptr_of::<timeval>()
+                    .vm_read_uninit()?
+                    .assume_init()
+            };
+            Some(time.try_into_time_value()?)
+        },
         0.into(),
     )
 }
@@ -194,9 +220,19 @@ pub fn sys_pselect6(
         readfds,
         writefds,
         exceptfds,
-        nullable!(timeout.get_as_ref())?
-            .map(|ts| ts.try_into_time_value())
-            .transpose()?,
+        if timeout.is_null() {
+            None
+        } else {
+            // The ABI structure consists solely of integer fields.
+            let time = unsafe {
+                timeout
+                    .address()
+                    .as_ptr_of::<timespec>()
+                    .vm_read_uninit()?
+                    .assume_init()
+            };
+            Some(time.try_into_time_value()?)
+        },
         sigmask,
     )
 }

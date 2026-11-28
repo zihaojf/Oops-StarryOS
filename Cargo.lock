@@ -3120,6 +3120,7 @@ dependencies = [
  "axfeat",
  "axfs-ng",
  "axplat-riscv64-visionfive2",
+ "log",
  "starry-kernel",
 ]
 

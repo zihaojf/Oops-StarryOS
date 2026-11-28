@@ -78,7 +78,7 @@ rv: prepare $(MKPHYSELF)
 	 $(COMMON_ENV) \
 	 RUSTFLAGS="-C link-arg=-T$(CURDIR)/$(TARGET_DIR)/$(RV_TARGET)/release/linker_$(RV_PLATFORM).lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc" \
 	 $(CARGO) build --release --offline --target $(RV_TARGET) --target-dir $(TARGET_DIR) \
-		--features "qemu,axfeat/bus-mmio"
+		--features "release-log-error,qemu,axfeat/bus-mmio"
 	@$(MKPHYSELF) $(RV_ELF) kernel-rv 0xffff_ffc0_0000_0000 0x8020_0000
 	@echo "==> kernel-rv is ready"
 
@@ -91,7 +91,7 @@ la: prepare $(MKPHYSELF)
 	 $(COMMON_ENV) \
 	 RUSTFLAGS="-C link-arg=-T$(CURDIR)/$(TARGET_DIR)/$(LA_TARGET)/release/linker_$(LA_PLATFORM).lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc" \
 	 $(CARGO) build --release --offline --target $(LA_TARGET) --target-dir $(TARGET_DIR) \
-		--features "qemu"
+		--features "release-log-error,qemu"
 	@$(MKPHYSELF) $(LA_ELF) kernel-la 0xffff_8000_0000_0000 0x0020_0040
 	@echo "==> kernel-la is ready"
 
@@ -113,7 +113,7 @@ check-rv: prepare
 	 AX_TARGET=$(RV_TARGET) \
 	 $(COMMON_ENV) \
 	 $(CARGO) clippy --offline --target $(RV_TARGET) --target-dir $(TARGET_DIR) \
-		--features "qemu,axfeat/bus-mmio" $(CLIPPY_ARGS)
+		--features "release-log-error,qemu,axfeat/bus-mmio" $(CLIPPY_ARGS)
 
 check-la: prepare
 	@AX_CONFIG_PATH=$(CURDIR)/$(LA_CONFIG) \
@@ -122,7 +122,7 @@ check-la: prepare
 	 AX_TARGET=$(LA_TARGET) \
 	 $(COMMON_ENV) \
 	 $(CARGO) clippy --offline --target $(LA_TARGET) --target-dir $(TARGET_DIR) \
-		--features "qemu" $(CLIPPY_ARGS)
+		--features "release-log-error,qemu" $(CLIPPY_ARGS)
 
 check: check-rv check-la
 

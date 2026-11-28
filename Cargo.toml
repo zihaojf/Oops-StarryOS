@@ -50,6 +50,7 @@ repository.workspace = true
 
 [features]
 default = []
+release-log-error = ["dep:log", "log/release_max_level_error"]
 qemu = [
     "axfeat/defplat",
     "axfeat/bus-pci",
@@ -73,6 +74,7 @@ path = "src/main.rs"
 required-features = ["qemu"]
 
 [dependencies]
+log = { version = "0.4", optional = true }
 axfeat.workspace = true
 axfs.workspace = true
 starry-kernel.workspace = true

@@ -1,9 +1,5 @@
 use alloc::{format, string::ToString, sync::Arc};
-use core::{
-    ffi::{c_char, c_int},
-    mem,
-    ops::{Deref, DerefMut},
-};
+use core::ffi::{c_char, c_int};
 
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, FileBackend, OpenOptions, OpenResult};
@@ -14,8 +10,8 @@ use linux_raw_sys::general::*;
 
 use crate::{
     file::{
-        Directory, FD_TABLE, File, FileLike, Pipe, add_file_like, close_file_like, get_file_like,
-        with_fs,
+        Directory, File, FileLike, Pipe, add_file_like, close_file_like, current_files,
+        get_file_like, with_fs,
     },
     mm::{UserPtr, vm_load_string},
     pseudofs::{Device, dev::tty},
@@ -161,22 +157,17 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> AxResult<isize> {
     let flags = CloseRangeFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
     debug!("sys_close_range <= fds: [{first}, {last}], flags: {flags:?}");
     if flags.contains(CloseRangeFlags::UNSHARE) {
-        // TODO: optimize
-        let curr = current();
-        let mut scope = curr.as_thread().proc_data.scope.write();
-        let mut guard = FD_TABLE.scope_mut(&mut scope);
-        let old_files = mem::take(guard.deref_mut());
-        old_files.write().clone_from(old_files.read().deref());
+        current().as_thread().unshare_files();
     }
 
     let cloexec = flags.contains(CloseRangeFlags::CLOEXEC);
-    let mut fd_table = FD_TABLE.write();
-    if let Some(max_index) = fd_table.ids().next_back() {
+    let files = current_files();
+    let mut fd_table = files.write();
+    let max_index = fd_table.ids().next_back();
+    if let Some(max_index) = max_index {
         for fd in first..=last.min(max_index as i32) {
             if cloexec {
-                if let Some(f) = fd_table.get_mut(fd as _) {
-                    f.cloexec = true;
-                }
+                let _ = fd_table.set_cloexec(fd as _, true);
             } else {
                 fd_table.remove(fd as _);
             }
@@ -221,7 +212,8 @@ pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> AxResult<isize> {
         return Err(AxError::InvalidInput);
     }
 
-    let mut fd_table = FD_TABLE.write();
+    let files = current_files();
+    let mut fd_table = files.write();
     let mut f = fd_table
         .get(old_fd as _)
         .cloned()
@@ -273,7 +265,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> AxResult<isize> {
             Ok(ret as _)
         }
         F_GETFD => {
-            let cloexec = FD_TABLE
+            let cloexec = current_files()
                 .read()
                 .get(fd as _)
                 .ok_or(AxError::BadFileDescriptor)?
@@ -282,11 +274,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> AxResult<isize> {
         }
         F_SETFD => {
             let cloexec = arg & FD_CLOEXEC as usize != 0;
-            FD_TABLE
-                .write()
-                .get_mut(fd as _)
-                .ok_or(AxError::BadFileDescriptor)?
-                .cloexec = cloexec;
+            current_files().write().set_cloexec(fd as _, cloexec)?;
             Ok(0)
         }
         F_GETPIPE_SZ => {

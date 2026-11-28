@@ -164,10 +164,10 @@ impl DirNode {
     }
 
     fn lookup_locked(&self, name: &str, children: &mut DirChildren) -> VfsResult<DirEntry> {
-        use hashbrown::hash_map::Entry;
-        match children.entry(name.to_owned()) {
-            Entry::Occupied(e) => Ok(e.get().clone()),
-            Entry::Vacant(e) => {
+        use hashbrown::hash_map::EntryRef;
+        match children.entry_ref(name) {
+            EntryRef::Occupied(e) => Ok(e.get().clone()),
+            EntryRef::Vacant(e) => {
                 let node = self.ops.lookup(name)?;
                 if self.ops.is_cacheable() {
                     e.insert(node.clone());

@@ -12,7 +12,7 @@ use starry_signal::Signo;
 use starry_vm::VmMutPtr;
 
 use crate::{
-    file::{FD_TABLE, FileLike, PidFd, close_file_like},
+    file::{FileLike, PidFd, close_file_like},
     mm::copy_from_kernel,
     task::{AsThread, ProcessData, Thread, add_task_to_table, new_user_task},
 };
@@ -231,15 +231,6 @@ impl CloneArgs {
 
             {
                 let mut scope = proc_data.scope.write();
-                if flags.contains(CloneFlags::FILES) {
-                    FD_TABLE.scope_mut(&mut scope).clone_from(&FD_TABLE);
-                } else {
-                    FD_TABLE
-                        .scope_mut(&mut scope)
-                        .write()
-                        .clone_from(&FD_TABLE.read());
-                }
-
                 if flags.contains(CloneFlags::FS) {
                     FS_CONTEXT.scope_mut(&mut scope).clone_from(&FS_CONTEXT);
                 } else {
@@ -255,13 +246,20 @@ impl CloneArgs {
 
         new_proc_data.proc.add_thread(tid);
 
-        let thr = Thread::new(tid, new_proc_data.clone());
+        let parent_files = curr.as_thread().file_table.read();
+        let files = if flags.contains(CloneFlags::FILES) {
+            parent_files.clone()
+        } else {
+            Arc::new(spin::RwLock::new(parent_files.read().clone()))
+        };
+        drop(parent_files);
+        let thr = Thread::new(tid, new_proc_data.clone(), files);
         if flags.contains(CloneFlags::CHILD_CLEARTID) {
             thr.set_clear_child_tid(child_tid);
         }
         if flags.contains(CloneFlags::PIDFD) && pidfd != 0 {
             let pidfd_obj = if flags.contains(CloneFlags::THREAD) {
-                PidFd::new_thread(&thr)
+                PidFd::new_thread(&thr, tid)
             } else {
                 PidFd::new_process(&new_proc_data)
             };

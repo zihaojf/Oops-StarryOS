@@ -60,7 +60,6 @@ impl UserContext {
 
         let scause = scause::read();
         let ret = if let Ok(cause) = scause.cause().try_into::<I, E>() {
-            let stval = stval::read();
             match cause {
                 Trap::Interrupt(_) => {
                     handle_trap!(IRQ, scause.bits());
@@ -71,17 +70,17 @@ impl UserContext {
                     ReturnReason::Syscall
                 }
                 Trap::Exception(E::LoadPageFault) => {
-                    ReturnReason::PageFault(va!(stval), PageFaultFlags::READ | PageFaultFlags::USER)
+                    ReturnReason::PageFault(va!(stval::read()), PageFaultFlags::READ | PageFaultFlags::USER)
                 }
                 Trap::Exception(E::StorePageFault) => ReturnReason::PageFault(
-                    va!(stval),
+                    va!(stval::read()),
                     PageFaultFlags::WRITE | PageFaultFlags::USER,
                 ),
                 Trap::Exception(E::InstructionPageFault) => ReturnReason::PageFault(
-                    va!(stval),
+                    va!(stval::read()),
                     PageFaultFlags::EXECUTE | PageFaultFlags::USER,
                 ),
-                Trap::Exception(e) => ReturnReason::Exception(ExceptionInfo { e, stval }),
+                Trap::Exception(e) => ReturnReason::Exception(ExceptionInfo { e, stval: stval::read() }),
             }
         } else {
             ReturnReason::Unknown

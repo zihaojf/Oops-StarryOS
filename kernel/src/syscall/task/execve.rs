@@ -9,7 +9,7 @@ use starry_vm::vm_load_until_nul;
 
 use crate::{
     config::USER_HEAP_BASE,
-    file::FD_TABLE,
+    file::current_files,
     mm::{load_user_app, vm_load_string},
     task::AsThread,
 };
@@ -72,7 +72,9 @@ pub fn sys_execve(
     curr.as_thread().set_clear_child_tid(0);
 
     // Close CLOEXEC file descriptors
-    let mut fd_table = FD_TABLE.write();
+    curr.as_thread().unshare_files();
+    let files = current_files();
+    let mut fd_table = files.write();
     let cloexec_fds = fd_table
         .ids()
         .filter(|it| fd_table.get(*it).unwrap().cloexec)

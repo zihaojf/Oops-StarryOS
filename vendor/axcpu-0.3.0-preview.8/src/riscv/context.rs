@@ -337,7 +337,11 @@ impl TaskContext {
         #[cfg(feature = "uspace")]
         if self.satp != next_ctx.satp {
             unsafe { crate::asm::write_user_page_table(next_ctx.satp) };
-            crate::asm::flush_tlb(None); // currently flush the entire TLB
+            #[cfg(target_arch = "riscv64")]
+            let tagged = page_table_multiarch::local_asid::enabled();
+            #[cfg(not(target_arch = "riscv64"))]
+            let tagged = false;
+            if !tagged { crate::asm::flush_tlb(None); }
         }
         #[cfg(feature = "fp-simd")]
         {

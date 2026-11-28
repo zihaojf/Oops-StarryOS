@@ -25,7 +25,7 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
             while !thr.pending_exit() {
                 let reason = uctx.run();
 
-                set_timer_state(&curr, TimerState::Kernel);
+                set_timer_state(&curr, thr, TimerState::Kernel);
 
                 match reason {
                     ReturnReason::Syscall => handle_syscall(&mut uctx),
@@ -66,7 +66,7 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                     while check_signals(thr, &mut uctx, None) {}
                 }
 
-                set_timer_state(&curr, TimerState::User);
+                set_timer_state(&curr, thr, TimerState::User);
                 curr.clear_interrupt();
             }
         },

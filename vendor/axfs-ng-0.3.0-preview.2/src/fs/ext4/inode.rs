@@ -69,10 +69,10 @@ impl NodeOps for Inode {
     }
 
     fn metadata(&self) -> VfsResult<Metadata> {
-        let mut fs = self.fs.lock();
         if let Some(metadata) = self.fs.cached_metadata(self.ino) {
             return Ok(metadata);
         }
+        let mut fs = self.fs.lock();
         let mut attr = FileAttr::default();
         fs.get_attr(self.ino, &mut attr).map_err(into_vfs_err)?;
         let metadata = Metadata {
@@ -134,7 +134,7 @@ impl NodeOps for Inode {
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::BLOCKING
+        NodeFlags::BLOCKING | NodeFlags::POLL_ALWAYS_READY
     }
 }
 

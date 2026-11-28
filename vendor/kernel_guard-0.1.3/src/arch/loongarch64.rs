@@ -13,5 +13,5 @@ pub fn local_irq_save_and_disable() -> usize {
 #[inline]
 pub fn local_irq_restore(flags: usize) {
     // restore the `IE` bit
-    unsafe { asm!("csrxchg {}, {}, 0x0", in(reg) flags, in(reg) IE_MASK) };
+    unsafe { asm!("csrxchg {}, {}, 0x0", inout(reg) flags => _, in(reg) IE_MASK) };
 }

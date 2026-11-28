@@ -5,7 +5,7 @@ use alloc::{
 };
 use core::{
     fmt,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use kspin::SpinNoIrq;
@@ -30,6 +30,7 @@ pub struct Process {
     // TODO: child subreaper9
     children: SpinNoIrq<StrongMap<Pid, Arc<Process>>>,
     parent: SpinNoIrq<Weak<Process>>,
+    parent_pid: AtomicU32,
 
     group: SpinNoIrq<Arc<ProcessGroup>>,
 }
@@ -55,6 +56,16 @@ impl Process {
     /// The parent [`Process`].
     pub fn parent(&self) -> Option<Arc<Process>> {
         self.parent.lock().upgrade()
+    }
+
+    /// Returns the current parent PID without acquiring a strong process reference.
+    pub fn parent_pid(&self) -> Option<Pid> {
+        let pid = self.parent_pid.load(Ordering::Acquire);
+        if pid == 0 {
+            self.parent().map(|p| p.pid())
+        } else {
+            Some(pid)
+        }
     }
 
     /// The child [`Process`]es.
@@ -212,10 +223,15 @@ impl Process {
         self.is_zombie.store(true, Ordering::Release);
 
         let mut reaper_children = reaper.children.lock();
+        let reaper_pid = reaper.pid();
         let reaper = Arc::downgrade(reaper);
 
         for (pid, child) in core::mem::take(&mut *children) {
-            *child.parent.lock() = reaper.clone();
+            {
+                let mut parent = child.parent.lock();
+                *parent = reaper.clone();
+                child.parent_pid.store(reaper_pid, Ordering::Release);
+            }
             reaper_children.insert(pid, child);
         }
     }
@@ -269,6 +285,7 @@ impl Process {
             is_zombie: AtomicBool::new(false),
             tg: SpinNoIrq::new(ThreadGroup::default()),
             children: SpinNoIrq::new(StrongMap::new()),
+            parent_pid: AtomicU32::new(parent.as_ref().map_or(0, |p| p.pid())),
             parent: SpinNoIrq::new(parent.as_ref().map(Arc::downgrade).unwrap_or_default()),
             group: SpinNoIrq::new(group.clone()),
         });

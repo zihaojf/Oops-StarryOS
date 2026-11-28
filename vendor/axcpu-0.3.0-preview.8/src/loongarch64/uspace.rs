@@ -46,8 +46,6 @@ impl UserContext {
         unsafe { enter_user(self) };
 
         let estat = estat::read();
-        let badv = badv::read().vaddr();
-        let badi = badi::read().inst();
 
         let ret = match estat.cause() {
             Trap::Interrupt(_) => {
@@ -60,17 +58,21 @@ impl UserContext {
             }
             Trap::Exception(Exception::LoadPageFault)
             | Trap::Exception(Exception::PageNonReadableFault) => {
-                ReturnReason::PageFault(va!(badv), PageFaultFlags::READ | PageFaultFlags::USER)
+                ReturnReason::PageFault(va!(badv::read().vaddr()), PageFaultFlags::READ | PageFaultFlags::USER)
             }
             Trap::Exception(Exception::StorePageFault)
             | Trap::Exception(Exception::PageModifyFault) => {
-                ReturnReason::PageFault(va!(badv), PageFaultFlags::WRITE | PageFaultFlags::USER)
+                ReturnReason::PageFault(va!(badv::read().vaddr()), PageFaultFlags::WRITE | PageFaultFlags::USER)
             }
             Trap::Exception(Exception::FetchPageFault)
             | Trap::Exception(Exception::PageNonExecutableFault) => {
-                ReturnReason::PageFault(va!(badv), PageFaultFlags::EXECUTE | PageFaultFlags::USER)
+                ReturnReason::PageFault(va!(badv::read().vaddr()), PageFaultFlags::EXECUTE | PageFaultFlags::USER)
             }
-            Trap::Exception(e) => ReturnReason::Exception(ExceptionInfo { e, badv, badi }),
+            Trap::Exception(e) => ReturnReason::Exception(ExceptionInfo {
+                e,
+                badv: badv::read().vaddr(),
+                badi: badi::read().inst(),
+            }),
             _ => ReturnReason::Unknown,
         };
 

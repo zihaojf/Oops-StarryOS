@@ -28,7 +28,7 @@ use starry_signal::{
 };
 
 pub use self::{futex::*, ops::*, resources::*, signal::*, stat::*, timer::*, user::*};
-use crate::mm::AddrSpace;
+use crate::{file::SharedFileTable, mm::AddrSpace};
 
 ///  A wrapper type that assumes the inner type is `Sync`.
 #[repr(transparent)]
@@ -48,6 +48,9 @@ impl<T> Deref for AssumeSync<T> {
 pub struct Thread {
     /// The process data shared by all threads in the process.
     pub proc_data: Arc<ProcessData>,
+
+    /// CLONE_FILES shares the table. Unsharing replaces only this thread's handle.
+    pub file_table: RwLock<SharedFileTable>,
 
     /// The clear thread tid field
     ///
@@ -84,10 +87,11 @@ pub struct Thread {
 
 impl Thread {
     /// Create a new [`Thread`].
-    pub fn new(tid: u32, proc_data: Arc<ProcessData>) -> Box<Self> {
+    pub fn new(tid: u32, proc_data: Arc<ProcessData>, files: SharedFileTable) -> Box<Self> {
         Box::new(Thread {
             signal: ThreadSignalManager::new(tid, proc_data.signal.clone()),
             proc_data,
+            file_table: RwLock::new(files),
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             time: AssumeSync(RefCell::new(TimeManager::new())),
@@ -96,6 +100,14 @@ impl Thread {
             accessing_user_memory: AtomicBool::new(false),
             exit_event: Arc::default(),
         })
+    }
+
+    pub fn unshare_files(&self) {
+        let mut handle = self.file_table.write();
+        if Arc::strong_count(&handle) > 1 {
+            let private = handle.read().clone();
+            *handle = Arc::new(RwLock::new(private));
+        }
     }
 
     /// Get the clear child tid field.

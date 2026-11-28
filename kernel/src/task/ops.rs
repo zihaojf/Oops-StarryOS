@@ -15,7 +15,7 @@ use starry_vm::{VmMutPtr, VmPtr};
 use weak_map::WeakMap;
 
 use super::{
-    AsThread, FutexKey, ProcessData, TimerState, futex_table_for, send_signal_thread_inner,
+    AsThread, FutexKey, ProcessData, Thread, TimerState, futex_table_for, send_signal_thread_inner,
     send_signal_to_process, send_signal_to_thread,
 };
 
@@ -124,10 +124,7 @@ pub fn poll_timer(task: &TaskInner) {
 }
 
 /// Sets the timer state.
-pub fn set_timer_state(task: &TaskInner, state: TimerState) {
-    let Some(thr) = task.try_as_thread() else {
-        return;
-    };
+pub fn set_timer_state(task: &TaskInner, thr: &Thread, state: TimerState) {
     let Ok(mut time) = thr.time.try_borrow_mut() else {
         // reentrant borrow, likely IRQ
         return;

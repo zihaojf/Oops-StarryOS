@@ -254,9 +254,8 @@ echo "#### StarryOS: arch $ARCH ####"
 #   musl / glibc           libc 变体
 #   basic-musl             套件 + 变体
 # 例：TEST_ONLY="basic busybox" TEST_SKIP="iozone"
-# TEST_ONLY="basic"
-# lmbench is scored by the competition and must run for both libc variants.
-# Keep the other previously disabled suites excluded by default.
+# During lmbench development, run both libc variants of this suite by default.
+TEST_ONLY="${TEST_ONLY-lmbench}"
 TEST_SKIP="${TEST_SKIP-unixbench ltp iozone}"
 
 # $1 是否命中 $2 里某个 token（token 可为通配）

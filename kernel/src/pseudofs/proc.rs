@@ -19,7 +19,6 @@ use indoc::indoc;
 use starry_process::Process;
 
 use crate::{
-    file::FD_TABLE,
     pseudofs::{
         DirMaker, DirMapping, NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile,
         SimpleFileOperation, SimpleFs,
@@ -158,8 +157,10 @@ impl SimpleDirOps for ThreadFdDir {
         let Some(task) = self.task.upgrade() else {
             return Box::new(iter::empty());
         };
-        let ids = FD_TABLE
-            .scope(&task.as_thread().proc_data.scope.read())
+        let ids = task
+            .as_thread()
+            .file_table
+            .read()
             .read()
             .ids()
             .map(|id| Cow::Owned(id.to_string()))
@@ -171,8 +172,10 @@ impl SimpleDirOps for ThreadFdDir {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-        let path = FD_TABLE
-            .scope(&task.as_thread().proc_data.scope.read())
+        let path = task
+            .as_thread()
+            .file_table
+            .read()
             .read()
             .get(fd as _)
             .ok_or(VfsError::NotFound)?

@@ -6,14 +6,13 @@
 extern crate alloc;
 
 use core::{
-    mem::MaybeUninit,
     task::{Context, Waker},
 };
 
-use alloc::{boxed::Box, sync::Arc, task::Wake};
+use alloc::{collections::VecDeque, sync::Arc, task::Wake};
 use bitflags::bitflags;
 use linux_raw_sys::general::*;
-use spin::{Lazy, Mutex};
+use spin::Mutex;
 
 bitflags! {
     /// I/O events.
@@ -65,52 +64,33 @@ pub trait Pollable {
 
 const POLL_SET_CAPACITY: usize = 64;
 
+#[derive(Default)]
 struct Inner {
-    entries: Box<[MaybeUninit<Waker>]>,
-    cursor: usize,
+    first: Option<Waker>,
+    others: VecDeque<Waker>,
 }
 
 impl Inner {
-    fn new() -> Self {
-        Self {
-            entries: Box::new_uninit_slice(POLL_SET_CAPACITY),
-            cursor: 0,
+    fn register(&mut self, waker: &Waker) -> Option<Waker> {
+        let Some(first) = &self.first else {
+            self.first = Some(waker.clone());
+            return None;
+        };
+        if first.will_wake(waker) || self.others.iter().any(|w| w.will_wake(waker)) {
+            return None;
         }
-    }
-
-    fn len(&self) -> usize {
-        self.cursor.min(POLL_SET_CAPACITY)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.cursor == 0
-    }
-
-    fn register(&mut self, waker: &Waker) {
-        let slot = self.cursor % POLL_SET_CAPACITY;
-        if self.cursor >= POLL_SET_CAPACITY {
-            let old = unsafe { self.entries[slot].assume_init_read() };
-            if !old.will_wake(waker) {
-                old.wake();
-            }
-            self.cursor = ((slot + 1) % POLL_SET_CAPACITY) + POLL_SET_CAPACITY;
+        let evicted = if self.others.len() == POLL_SET_CAPACITY - 1 {
+            core::mem::replace(&mut self.first, self.others.pop_front())
         } else {
-            self.cursor += 1;
-        }
-        self.entries[slot].write(waker.clone());
-    }
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        for i in 0..self.len() {
-            unsafe { self.entries[i].assume_init_read() }.wake();
-        }
+            None
+        };
+        self.others.push_back(waker.clone());
+        evicted
     }
 }
 
 /// A data structure for waking up tasks that are waiting for I/O events.
-pub struct PollSet(Lazy<Mutex<Inner>>);
+pub struct PollSet(Mutex<Inner>);
 
 impl Default for PollSet {
     fn default() -> Self {
@@ -121,23 +101,30 @@ impl Default for PollSet {
 impl PollSet {
     /// Creates a new empty [`PollSet`].
     pub const fn new() -> Self {
-        Self(Lazy::new(|| Mutex::new(Inner::new())))
+        Self(Mutex::new(Inner {
+            first: None,
+            others: VecDeque::new(),
+        }))
     }
 
     /// Registers a waker.
     pub fn register(&self, waker: &Waker) {
-        self.0.lock().register(waker);
+        let evicted = self.0.lock().register(waker);
+        if let Some(w) = evicted {
+            w.wake();
+        }
     }
 
     /// Wakes up all registered wakers.
     pub fn wake(&self) -> usize {
-        let mut guard = self.0.lock();
-        if guard.is_empty() {
-            return 0;
+        // Ordinary pipe handoff has one waiter. Keep that case allocation-free,
+        // and run callbacks after releasing the registration lock.
+        let inner = core::mem::take(&mut *self.0.lock());
+        let count = usize::from(inner.first.is_some()) + inner.others.len();
+        for w in inner.first.into_iter().chain(inner.others) {
+            w.wake();
         }
-        let inner = core::mem::replace(&mut *guard, Inner::new());
-        drop(guard);
-        inner.len()
+        count
     }
 }
 

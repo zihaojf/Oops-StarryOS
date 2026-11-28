@@ -12,9 +12,9 @@ pub fn sys_getppid() -> AxResult<isize> {
         .as_thread()
         .proc_data
         .proc
-        .parent()
+        .parent_pid()
         .ok_or(AxError::NoSuchProcess)
-        .map(|p| p.pid() as _)
+        .map(|pid| pid as _)
 }
 
 pub fn sys_gettid() -> AxResult<isize> {

@@ -271,7 +271,9 @@ impl TaskContext {
         {
             if self.pgdl != next_ctx.pgdl {
                 unsafe { crate::asm::write_user_page_table(pa!(next_ctx.pgdl)) };
-                crate::asm::flush_tlb(None); // currently flush the entire TLB
+                if !page_table_multiarch::local_asid::enabled() {
+                    crate::asm::flush_tlb(None);
+                }
             }
         }
         #[cfg(feature = "fp-simd")]

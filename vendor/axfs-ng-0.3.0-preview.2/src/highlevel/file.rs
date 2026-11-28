@@ -212,7 +212,7 @@ impl OpenOptions {
         } else {
             // TODO(mivik): is this correct?
             let non_cacheable_type = matches!(
-                loc.metadata()?.node_type,
+                loc.node_type(),
                 NodeType::CharacterDevice | NodeType::Fifo | NodeType::Socket
             );
 
@@ -377,7 +377,11 @@ struct CachedFileShared {
 impl CachedFileShared {
     pub fn new() -> Self {
         Self {
-            page_cache: Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())),
+            page_cache: Mutex::new({
+                let mut pages = LruCache::unbounded();
+                pages.resize(NonZeroUsize::new(256).unwrap());
+                pages
+            }),
             evict_listeners: Mutex::new(LinkedList::default()),
         }
     }
@@ -879,6 +883,14 @@ impl File {
         self.inner.location()
     }
 
+    #[cfg(feature = "times")]
+    fn mark_access(&self, bits: u8) {
+        // Bits are accumulated for the lifetime of this open file description.
+        if self.access_flags.load(Ordering::Relaxed) & bits != bits {
+            self.access_flags.fetch_or(bits, Ordering::Relaxed);
+        }
+    }
+
     /// Reads a number of bytes starting from a given offset.
     pub fn read_at(&self, dst: impl Write + IoBufMut, offset: u64) -> VfsResult<usize> {
         self.access(FileFlags::READ)?.read_at(dst, offset)
@@ -901,9 +913,7 @@ impl File {
     /// Reads data from the current position, advancing the cursor.
     pub fn read(&self, dst: impl Write + IoBufMut) -> axio::Result<usize> {
         #[cfg(feature = "times")]
-        {
-            self.access_flags.fetch_or(1, Ordering::AcqRel);
-        }
+        self.mark_access(1);
         if let Some(pos) = self.position.as_ref() {
             let mut pos = pos.lock();
             self.read_at(dst, *pos).inspect(|n| {
@@ -917,9 +927,7 @@ impl File {
     /// Writes data at the current position (or appends), advancing the cursor.
     pub fn write(&self, src: impl Read + IoBuf) -> axio::Result<usize> {
         #[cfg(feature = "times")]
-        {
-            self.access_flags.fetch_or(3, Ordering::AcqRel);
-        }
+        self.mark_access(3);
         if let Some(pos) = self.position.as_ref() {
             let mut pos = pos.lock();
             if let Ok(f) = self.access(FileFlags::APPEND) {

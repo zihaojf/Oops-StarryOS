@@ -13,6 +13,15 @@ use crate::{
     mm::vm_load_string,
 };
 
+fn load_stat_path(path: *const c_char, flags: u32) -> AxResult<Option<alloc::string::String>> {
+    let Some(ptr) = path.nullable() else { return Ok(None) };
+    // libc implements fstat with an empty pathname on some ABIs.
+    if flags & AT_EMPTY_PATH != 0 && ptr.vm_read()? == 0 {
+        return Ok(None);
+    }
+    vm_load_string(ptr).map(Some)
+}
+
 /// Get the file metadata by `path` and write into `statbuf`.
 ///
 /// Return 0 if success.
@@ -49,7 +58,7 @@ pub fn sys_fstatat(
     statbuf: *mut stat,
     flags: u32,
 ) -> AxResult<isize> {
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = load_stat_path(path, flags)?;
 
     debug!("sys_fstatat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
@@ -96,7 +105,7 @@ pub fn sys_statx(
     //        below), then the target file is the one referred to by the
     //        file descriptor dirfd.
 
-    let path = path.nullable().map(vm_load_string).transpose()?;
+    let path = load_stat_path(path, flags)?;
     debug!("sys_statx <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     let metadata = if flags & AT_EMPTY_PATH != 0 && path.as_deref().is_none_or(str::is_empty) {

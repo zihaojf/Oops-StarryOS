@@ -267,7 +267,7 @@ impl<Hal: SystemHal> InodeRef<Hal> {
     }
 
     pub fn set_len(&mut self, len: u64) -> Ext4Result<()> {
-        static EMPTY: [u8; 4096] = [0; 4096];
+        static EMPTY: [u8; 65536] = [0; 65536]; // Maximum ext4 block size.
 
         let cur_len = self.size();
         if len < cur_len {
@@ -283,16 +283,20 @@ impl<Hal: SystemHal> InodeRef<Hal> {
                 self.write_bytes(fblock * block_size as u64, &EMPTY[..block_size as usize])?;
             }
 
-            // Clear the last block extended part
-            let old_last_block = (cur_len / block_size as u64) as u32;
-            let old_block_start = (cur_len - (old_last_block as u64 * block_size as u64)) as usize;
-            let fblock = self.init_inode_fblock(old_last_block)?;
-            assert!(fblock != 0, "fblock should not be zero");
-            let length = block_size as usize - old_block_start;
-            self.write_bytes(
-                fblock * block_size as u64 + old_block_start as u64,
-                &EMPTY[..length],
-            )?;
+            // Newly allocated blocks are already zero. Only an old partial
+            // block may contain bytes hidden by a previous truncation.
+            let offset = cur_len % u64::from(block_size);
+            if offset != 0 {
+                let old_block = (cur_len / u64::from(block_size)) as u32;
+                let fblock = self.get_inode_fblock(old_block)?;
+                if fblock != 0 {
+                    let length = (u64::from(block_size) - offset).min(len - cur_len);
+                    self.write_bytes(
+                        fblock * u64::from(block_size) + offset,
+                        &EMPTY[..length as usize],
+                    )?;
+                }
+            }
 
             unsafe {
                 ext4_inode_set_size(self.inner.inode, len);

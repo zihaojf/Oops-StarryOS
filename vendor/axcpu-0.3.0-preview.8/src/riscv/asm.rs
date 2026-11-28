@@ -16,6 +16,33 @@ pub fn disable_irqs() {
     unsafe { sstatus::clear_sie() }
 }
 
+/// Probe Sv39 ASID support with the current root retained.
+///
+/// # Safety
+/// Call only during initialization of a system configured for a single CPU.
+#[cfg(target_arch = "riscv64")]
+pub unsafe fn enable_local_asids() {
+    let was_enabled = irqs_enabled();
+    disable_irqs();
+    let old = satp::read();
+    unsafe {
+        satp::set(old.mode(), 255, old.ppn());
+    }
+    let supported = satp::read().asid() == 255;
+    unsafe {
+        satp::set(old.mode(), old.asid(), old.ppn());
+    }
+    asm::sfence_vma_all();
+    if supported {
+        unsafe {
+            page_table_multiarch::local_asid::enable();
+        }
+    }
+    if was_enabled {
+        enable_irqs();
+    }
+}
+
 /// Returns whether the current CPU is allowed to respond to interrupts.
 #[inline]
 pub fn irqs_enabled() -> bool {
@@ -72,6 +99,17 @@ pub fn read_kernel_page_table() -> PhysAddr {
 /// This function is unsafe as it changes the virtual memory address space.
 #[inline]
 pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
+    #[cfg(target_arch = "riscv64")]
+    if page_table_multiarch::local_asid::enabled() {
+        let (tag, replace) = unsafe { page_table_multiarch::local_asid::claim(root_paddr) };
+        unsafe { satp::set(satp::Mode::Sv39, tag, root_paddr.as_usize() >> 12) };
+        if replace {
+            unsafe {
+                core::arch::asm!("sfence.vma zero, {tag}", tag = in(reg) tag);
+            }
+        }
+        return;
+    }
     unsafe { satp::set(satp::Mode::Sv39, 0, root_paddr.as_usize() >> 12) };
 }
 
@@ -98,7 +136,7 @@ pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
 #[inline]
 pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     if let Some(vaddr) = vaddr {
-        asm::sfence_vma(0, vaddr.as_usize())
+        unsafe { core::arch::asm!("sfence.vma {va}, zero", va = in(reg) vaddr.as_usize()); }
     } else {
         asm::sfence_vma_all();
     }

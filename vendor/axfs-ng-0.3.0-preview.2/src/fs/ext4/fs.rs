@@ -51,25 +51,28 @@ impl Ext4Filesystem {
     /// Invalidate inode metadata while holding the filesystem mutation lock.
     pub(crate) fn lock_for_update(&self) -> MutexGuard<'_, LwExt4Filesystem> {
         let guard = self.inner.lock();
-        self.revision.fetch_add(1, Ordering::Relaxed);
+        self.revision.fetch_add(1, Ordering::Release);
         guard
     }
 
-    /// Call with the filesystem lock held to pair metadata with a stable revision.
-    pub(crate) fn revision(&self) -> usize {
-        self.revision.load(Ordering::Relaxed)
+    fn revision(&self) -> usize {
+        self.revision.load(Ordering::Acquire)
     }
 
     /// Cached by inode number so metadata survives transient pathname lookups.
-    /// The caller holds the filesystem lock for both cache reads and writes.
+    /// Cache hits can bypass the filesystem lock. A contended cache is a miss.
     pub(crate) fn cached_metadata(&self, ino: u32) -> Option<Metadata> {
-        self.metadata_cache.lock().get(&ino)
+        self.metadata_cache.try_lock()?.get(&ino)
             .filter(|(revision, _)| *revision == self.revision())
             .map(|(_, metadata)| metadata.clone())
     }
 
     pub(crate) fn cache_metadata(&self, ino: u32, metadata: &Metadata) {
-        self.metadata_cache.lock().put(ino, (self.revision(), metadata.clone()));
+        // The caller still holds the filesystem lock. Never wait on a cache
+        // reader that may have been preempted on this CPU.
+        if let Some(mut cache) = self.metadata_cache.try_lock() {
+            cache.put(ino, (self.revision(), metadata.clone()));
+        }
     }
 }
 

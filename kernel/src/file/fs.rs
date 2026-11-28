@@ -11,7 +11,7 @@ use axfs::{FS_CONTEXT, FsContext};
 use axfs_ng_vfs::{Location, Metadata, NodeFlags};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
-use axtask::future::{block_on, poll_io};
+use axtask::future::blocking_io;
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 use super::{FileLike, Kstat, get_file_like};
@@ -99,12 +99,14 @@ pub fn metadata_to_kstat(metadata: &Metadata) -> Kstat {
 /// File wrapper for `axfs::fops::File`.
 pub struct File {
     inner: axfs::File,
+    node_flags: NodeFlags,
     nonblock: AtomicBool,
 }
 
 impl File {
     pub fn new(inner: axfs::File) -> Self {
         Self {
+            node_flags: inner.location().flags(),
             inner,
             nonblock: AtomicBool::new(false),
         }
@@ -112,10 +114,6 @@ impl File {
 
     pub fn inner(&self) -> &axfs::File {
         &self.inner
-    }
-
-    fn is_blocking(&self) -> bool {
-        self.inner.location().flags().contains(NodeFlags::BLOCKING)
     }
 }
 
@@ -125,25 +123,29 @@ fn path_for(loc: &Location) -> Cow<'static, str> {
 }
 
 impl FileLike for File {
+    fn always_read_write_ready(&self) -> bool {
+        self.node_flags.contains(NodeFlags::POLL_ALWAYS_READY)
+    }
+
     fn read(&self, dst: &mut IoDst) -> AxResult<usize> {
         let inner = self.inner();
-        if likely(self.is_blocking()) {
+        if likely(self.node_flags.contains(NodeFlags::BLOCKING)) {
             inner.read(dst)
         } else {
-            block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
+            blocking_io(self, IoEvents::IN, self.nonblocking(), || {
                 inner.read(&mut *dst)
-            }))
+            })
         }
     }
 
     fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
         let inner = self.inner();
-        if likely(self.is_blocking()) {
+        if likely(self.node_flags.contains(NodeFlags::BLOCKING)) {
             inner.write(src)
         } else {
-            block_on(poll_io(self, IoEvents::OUT, self.nonblocking(), || {
+            blocking_io(self, IoEvents::OUT, self.nonblocking(), || {
                 inner.write(&mut *src)
-            }))
+            })
         }
     }
 

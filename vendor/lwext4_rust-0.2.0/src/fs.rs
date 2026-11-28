@@ -130,8 +130,20 @@ impl<Hal: SystemHal, Dev: BlockDevice> Ext4Filesystem<Hal, Dev> {
     pub fn write_at(&mut self, ino: u32, buf: &[u8], offset: u64) -> Ext4Result<usize> {
         self.inode_ref(ino)?.write_at(buf, offset)
     }
+    // Keep repeated changes to a bitmap, group descriptor or inode block in
+    // the cache until this single operation has released all its inode refs.
+    fn with_metadata_writeback<R>(
+        &mut self,
+        op: impl FnOnce(&mut Self) -> Ext4Result<R>,
+    ) -> Ext4Result<R> {
+        let guard = WritebackGuard::new(self.bdev.inner.as_mut());
+        let result = op(self);
+        let flushed = guard.finish();
+        result.and_then(|value| flushed.map(|()| value))
+    }
+
     pub fn set_len(&mut self, ino: u32, len: u64) -> Ext4Result<()> {
-        self.inode_ref(ino)?.set_len(len)
+        self.with_metadata_writeback(|fs| fs.inode_ref(ino)?.set_len(len))
     }
     pub fn set_symlink(&mut self, ino: u32, buf: &[u8]) -> Ext4Result<()> {
         self.inode_ref(ino)?.set_symlink(buf)
@@ -144,6 +156,16 @@ impl<Hal: SystemHal, Dev: BlockDevice> Ext4Filesystem<Hal, Dev> {
     }
 
     pub fn create(&mut self, parent: u32, name: &str, ty: InodeType, mode: u32) -> Ext4Result<u32> {
+        self.with_metadata_writeback(|fs| fs.create_inner(parent, name, ty, mode))
+    }
+
+    fn create_inner(
+        &mut self,
+        parent: u32,
+        name: &str,
+        ty: InodeType,
+        mode: u32,
+    ) -> Ext4Result<u32> {
         let mut child = self.alloc_inode(ty)?;
         let mut parent = self.inode_ref(parent)?;
         parent.add_entry(name, &mut child)?;
@@ -199,6 +221,10 @@ impl<Hal: SystemHal, Dev: BlockDevice> Ext4Filesystem<Hal, Dev> {
     }
 
     pub fn unlink(&mut self, dir: u32, name: &str) -> Ext4Result {
+        self.with_metadata_writeback(|fs| fs.unlink_inner(dir, name))
+    }
+
+    fn unlink_inner(&mut self, dir: u32, name: &str) -> Ext4Result {
         let mut dir_ref = self.inode_ref(dir)?;
         let child = self.clone_ref(&dir_ref).lookup(name)?.entry().ino();
         let mut child_ref = self.inode_ref(child)?;
@@ -278,6 +304,11 @@ impl WritebackGuard {
     pub fn new(bdev: *mut ext4_blockdev) -> Self {
         unsafe { ext4_block_cache_write_back(bdev, 1) };
         Self { bdev }
+    }
+
+    fn finish(self) -> Ext4Result<()> {
+        let guard = core::mem::ManuallyDrop::new(self);
+        unsafe { ext4_block_cache_write_back(guard.bdev, 0) }.context("flush metadata writeback")
     }
 }
 impl Drop for WritebackGuard {

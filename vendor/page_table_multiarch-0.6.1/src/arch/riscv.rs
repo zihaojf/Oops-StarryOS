@@ -9,15 +9,31 @@ use crate::{PageTable64, PageTable64Cursor, PagingMetaData};
 pub trait SvVirtAddr: memory_addr::MemoryAddr + Send + Sync {
     /// Flush the TLB.
     fn flush_tlb(vaddr: Option<Self>);
+    /// Flush an update for this root; other translation schemes keep their own policy.
+    fn flush_root(_root: memory_addr::PhysAddr, va: Option<Self>) {
+        Self::flush_tlb(va);
+    }
 }
 
 impl SvVirtAddr for VirtAddr {
     #[inline]
     fn flush_tlb(vaddr: Option<Self>) {
         if let Some(vaddr) = vaddr {
-            riscv::asm::sfence_vma(0, vaddr.as_usize())
+            unsafe { core::arch::asm!("sfence.vma {va}, zero", va = in(reg) vaddr.as_usize()); }
         } else {
             riscv::asm::sfence_vma_all();
+        }
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    fn flush_root(root: memory_addr::PhysAddr, va: Option<Self>) {
+        if crate::local_asid::enabled()
+            && let Some(va) = va
+            && va.as_usize() < (1usize << 38)
+        {
+            riscv::asm::sfence_vma(crate::local_asid::tag(root), va.as_usize());
+        } else {
+            Self::flush_tlb(va);
         }
     }
 }
@@ -38,6 +54,15 @@ impl<VA: SvVirtAddr> PagingMetaData for Sv39MetaData<VA> {
     const VA_MAX_BITS: usize = 39;
 
     type VirtAddr = VA;
+
+    #[cfg(target_arch = "riscv64")]
+    fn root_allocated(root: memory_addr::PhysAddr) {
+        crate::local_asid::root_allocated(root);
+    }
+    fn flush_root(root: memory_addr::PhysAddr, va: Option<VA>) {
+        VA::flush_root(root, va);
+    }
+
 
     #[inline]
     fn flush_tlb(vaddr: Option<VA>) {

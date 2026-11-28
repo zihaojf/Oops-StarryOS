@@ -1,6 +1,8 @@
 pub mod epoll;
 pub mod event;
 mod fs;
+mod table;
+pub use table::FileTable;
 mod net;
 mod pidfd;
 mod pipe;
@@ -16,7 +18,6 @@ use axio::prelude::*;
 use axpoll::Pollable;
 use axtask::current;
 use downcast_rs::{DowncastSync, impl_downcast};
-use flatten_objects::FlattenObjects;
 use linux_raw_sys::general::{RLIMIT_NOFILE, stat, statx, statx_timestamp};
 use spin::RwLock;
 
@@ -26,7 +27,7 @@ pub use self::{
     pidfd::PidFd,
     pipe::Pipe,
 };
-use crate::task::{AX_FILE_LIMIT, AsThread};
+use crate::task::AsThread;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Kstat {
@@ -153,6 +154,11 @@ pub trait FileLike: Pollable + DowncastSync {
         Err(AxError::NotATty)
     }
 
+    /// True only when poll() always returns exactly IN | OUT for this open file.
+    fn always_read_write_ready(&self) -> bool {
+        false
+    }
+
     fn nonblocking(&self) -> bool {
         false
     }
@@ -185,14 +191,18 @@ pub struct FileDescriptor {
     pub cloexec: bool,
 }
 
-scope_local::scope_local! {
-    /// The current file descriptor table.
-    pub static FD_TABLE: Arc<RwLock<FlattenObjects<FileDescriptor, AX_FILE_LIMIT>>> = Arc::default();
+pub type SharedFileTable = Arc<RwLock<FileTable>>;
+
+pub fn current_files() -> SharedFileTable {
+    current().as_thread().file_table.read().clone()
 }
 
 /// Get a file-like object by `fd`.
 pub fn get_file_like(fd: c_int) -> AxResult<Arc<dyn FileLike>> {
-    FD_TABLE
+    current()
+        .as_thread()
+        .file_table
+        .read()
         .read()
         .get(fd as usize)
         .map(|fd| fd.inner.clone())
@@ -202,7 +212,8 @@ pub fn get_file_like(fd: c_int) -> AxResult<Arc<dyn FileLike>> {
 /// Add a file to the file descriptor table.
 pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> AxResult<c_int> {
     let max_nofile = current().as_thread().proc_data.rlim.read()[RLIMIT_NOFILE].current;
-    let mut table = FD_TABLE.write();
+    let files = current_files();
+    let mut table = files.write();
     if table.count() as u64 >= max_nofile {
         return Err(AxError::TooManyOpenFiles);
     }
@@ -212,7 +223,7 @@ pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> AxResult<c_int> {
 
 /// Close a file by `fd`.
 pub fn close_file_like(fd: c_int) -> AxResult {
-    let f = FD_TABLE
+    let f = current_files()
         .write()
         .remove(fd as usize)
         .ok_or(AxError::BadFileDescriptor)?;
@@ -220,7 +231,7 @@ pub fn close_file_like(fd: c_int) -> AxResult {
     Ok(())
 }
 
-pub fn add_stdio(fd_table: &mut FlattenObjects<FileDescriptor, AX_FILE_LIMIT>) -> AxResult<()> {
+pub fn add_stdio(fd_table: &mut FileTable) -> AxResult<()> {
     assert_eq!(fd_table.count(), 0);
     let cx = FS_CONTEXT.lock();
     let open = |options: &mut OpenOptions| {

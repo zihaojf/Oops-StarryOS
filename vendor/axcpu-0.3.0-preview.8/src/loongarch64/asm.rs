@@ -4,6 +4,18 @@ use core::arch::asm;
 
 use loongArch64::register::{crmd, ecfg, eentry, pgdh, pgdl};
 use memory_addr::{PhysAddr, VirtAddr};
+use page_table_multiarch::local_asid;
+
+/// Enable ASID-tagged context switches on supported single-core platforms.
+///
+/// # Safety
+/// Call only during initialization of a system configured for a single CPU.
+pub unsafe fn enable_local_asids() {
+    if loongArch64::register::asid::read().asid_width() >= 8 {
+        flush_tlb(None);
+        unsafe { local_asid::enable() };
+    }
+}
 
 /// Allows the current CPU to respond to interrupts.
 #[inline]
@@ -63,6 +75,15 @@ pub fn read_kernel_page_table() -> PhysAddr {
 ///
 /// This function is unsafe as it changes the virtual memory address space.
 pub unsafe fn write_user_page_table(root_paddr: PhysAddr) {
+    if local_asid::enabled() {
+        let (tag, replace) = unsafe { local_asid::claim(root_paddr) };
+        if replace {
+            unsafe {
+                asm!("dbar 0; invtlb 0x04, {tag}, $r0", tag = in(reg) tag);
+            }
+        }
+        loongArch64::register::asid::set_asid(tag);
+    }
     pgdl::set_base(root_paddr.as_usize() as _);
 }
 
@@ -85,7 +106,7 @@ pub unsafe fn write_kernel_page_table(root_paddr: PhysAddr) {
 #[inline]
 pub fn flush_tlb(vaddr: Option<VirtAddr>) {
     unsafe {
-        if let Some(vaddr) = vaddr {
+        if let Some(vaddr) = vaddr.filter(|_| !local_asid::enabled()) {
             // <https://loongson.github.io/LoongArch-Documentation/LoongArch-Vol1-EN.html#_dbar>
             //
             // Only after all previous load/store access operations are completely

@@ -10,6 +10,8 @@ mod arch;
 mod bits32;
 #[cfg(any(target_pointer_width = "64", doc, docsrs))]
 mod bits64;
+#[cfg(any(target_arch = "loongarch64", target_arch = "riscv64", doc, docsrs))]
+pub mod local_asid;
 
 use core::fmt::Debug;
 
@@ -97,6 +99,14 @@ pub trait PagingMetaData: Sync + Send {
     /// If `vaddr` is [`None`], flushes the entire TLB. Otherwise, flushes the
     /// TLB entry at the given virtual address.
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
+
+    /// A freshly allocated root can reuse the physical frame of an older table.
+    fn root_allocated(_root: PhysAddr) {}
+
+    /// Invalidate entries belonging to a specified page table.
+    fn flush_root(_root: PhysAddr, vaddr: Option<Self::VirtAddr>) {
+        Self::flush_tlb(vaddr);
+    }
 }
 
 /// The low-level **OS-dependent** helpers that must be provided for

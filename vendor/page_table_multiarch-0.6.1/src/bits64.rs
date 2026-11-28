@@ -43,6 +43,7 @@ impl<M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64<M, PTE, H
     /// It will allocate a new page for the root page table.
     pub fn try_new() -> PagingResult<Self> {
         let root_paddr = Self::alloc_table()?;
+        M::root_allocated(root_paddr);
         Ok(Self {
             root_paddr,
             #[cfg(feature = "copy-from")]
@@ -609,11 +610,11 @@ impl<'a, M: PagingMetaData, PTE: GenericPTE, H: PagingHandler> PageTable64Cursor
             TlbFlusher::None => {}
             TlbFlusher::Array(addrs) => {
                 for vaddr in addrs.iter() {
-                    M::flush_tlb(Some(*vaddr));
+                    M::flush_root(self.inner.root_paddr, Some(*vaddr));
                 }
             }
             TlbFlusher::Full => {
-                M::flush_tlb(None);
+                M::flush_root(self.inner.root_paddr, None);
             }
         }
         self.flusher = TlbFlusher::None;

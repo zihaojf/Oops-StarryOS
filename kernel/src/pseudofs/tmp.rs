@@ -297,7 +297,7 @@ impl NodeOps for MemoryNode {
     }
 
     fn flags(&self) -> NodeFlags {
-        NodeFlags::ALWAYS_CACHE
+        NodeFlags::ALWAYS_CACHE | NodeFlags::POLL_ALWAYS_READY
     }
 }
 
